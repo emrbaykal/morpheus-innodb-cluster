@@ -453,16 +453,23 @@ def collect_variables():
     config["ssh_user"] = prompt_input("SSH User", default="ansible")
 
     default_key = os.path.expanduser("~/.ssh/id_rsa")
-    config["ssh_key_file"] = prompt_input("SSH Key File", default=default_key)
+    print_hint("If you don't use an SSH key, just press Enter and provide a password instead.")
+    ssh_key_input = prompt_input("SSH Key File", default=default_key)
 
-    if not os.path.exists(config["ssh_key_file"]):
-        print_warning(f"SSH key file not found: {config['ssh_key_file']}")
-        if prompt_yes_no("Connect with SSH password instead?", default_yes=True):
-            config["ssh_password"] = prompt_password("SSH Password", confirm=False)
-            config["ssh_key_file"] = ""
-        else:
-            print_error("An SSH key file or password is required!")
-            sys.exit(1)
+    # User pressed Enter with default but file doesn't exist, or explicitly cleared it
+    if ssh_key_input == default_key and not os.path.exists(default_key):
+        ssh_key_input = ""
+
+    if ssh_key_input and not os.path.exists(ssh_key_input):
+        print_warning(f"SSH key file not found: {ssh_key_input}")
+        ssh_key_input = ""
+
+    if not ssh_key_input:
+        print_info("No SSH key — switching to password authentication.")
+        config["ssh_password"] = prompt_password("SSH Password", confirm=False)
+        config["ssh_key_file"] = ""
+    else:
+        config["ssh_key_file"] = ssh_key_input
 
     print()
     if prompt_yes_no("Does the SSH user require a sudo password?", default_yes=False):
