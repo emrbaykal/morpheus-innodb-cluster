@@ -1,0 +1,6 @@
+---
+# handlers file for selinux
+- name: restart_ssh_client
+  command: "{{item}}"
+  with_items:
+    - systemctl restart ssh

@@ -1,0 +1,7 @@
+---
+
+# Variables are injected via extra-vars from Python orchestrator script
+# mysql_root_password: (required)
+# innodb_admin_user: (required)
+# innodb_admin_password: (required)
+# innodb_cluster_name: (required)

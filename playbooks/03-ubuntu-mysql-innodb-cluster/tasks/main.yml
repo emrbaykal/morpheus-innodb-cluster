@@ -1,0 +1,94 @@
+---
+
+- name: Create Cluster Admin
+  mysql_user:
+    name: "{{ innodb_admin_user }}"
+    password: "{{ innodb_admin_password }}"
+    priv: '*.*:ALL,GRANT'
+    host: '%'
+    append_privs: yes
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    state: present
+
+- name: Delete blank users
+  mysql_query:
+    query: "DELETE FROM mysql.user WHERE User='';"
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+
+- name: Delete test database
+  mysql_db:
+    name: test
+    state: absent
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+
+- name: Delete references to test database
+  mysql_query:
+    query: "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+
+- name: Set invisible primary key
+  mysql_query:
+    query: "SET PERSIST sql_generate_invisible_primary_key=1;"
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+
+- name: Calculate innodb_buffer_pool_size (80% of total RAM)
+  set_fact:
+    innodb_buffer_pool_size_gb: "{{ ((ansible_memtotal_mb * 0.80) / 1024) | round(0, 'floor') | int }}"
+
+- name: Display calculated innodb_buffer_pool_size
+  debug:
+    msg: "Total RAM: {{ ansible_memtotal_mb }}MB -> innodb_buffer_pool_size: {{ innodb_buffer_pool_size_gb }}G (80%)"
+
+- name: Create MySQL InnoDB configuration file
+  copy:
+    dest: /etc/mysql/mysql.conf.d/innodb-mysqld.cnf
+    content: |
+      [mysqld]
+      bind-address = 0.0.0.0
+      max_connections = 451
+      innodb_buffer_pool_size = {{ innodb_buffer_pool_size_gb }}G
+      innodb_use_fdatasync = ON
+      sql_generate_invisible_primary_key = 1
+      binlog_expire_logs_seconds = 604800
+      binlog_expire_logs_auto_purge = ON
+      gtid_mode = ON
+      enforce_gtid_consistency = ON
+      server_id = {{ ansible_default_ipv4.address.split('.')[-1] }}
+
+      [mysqldump]
+      set-gtid-purged = OFF
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Restart mysql_db
+
+- name: Flush handlers
+  meta: flush_handlers
+
+# ─── Post-Restart Verification ──────────────────────────────
+
+- name: Verify applied MySQL parameters
+  shell: >
+    mysql -u root -p'{{ mysql_root_password }}' -N -e
+    "SELECT CONCAT(
+      'innodb_buffer_pool_size=', CAST(@@innodb_buffer_pool_size / (1024*1024*1024) AS UNSIGNED), 'G',
+      ' | innodb_use_fdatasync=', @@innodb_use_fdatasync,
+      ' | sql_generate_invisible_primary_key=', @@sql_generate_invisible_primary_key,
+      ' | max_connections=', @@max_connections,
+      ' | binlog_expire_logs_seconds=', @@binlog_expire_logs_seconds,
+      ' | server_id=', @@server_id
+    );"
+  register: verify_params
+  changed_when: false
+  no_log: false
+
+- name: Display verified parameters
+  debug:
+    var: verify_params.stdout
+

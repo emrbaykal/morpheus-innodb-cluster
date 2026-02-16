@@ -1,0 +1,49 @@
+---
+- hosts: all
+  gather_facts: true
+  become: true
+  vars:
+    ansible_python_interpreter: /usr/bin/python3
+    # ansible_user and ansible_ssh_private_key_file are now provided via inventory
+
+  pre_tasks:
+    - name: Populate /etc/hosts with cluster node entries
+      lineinfile:
+        path: /etc/hosts
+        regexp: ".*{{ item.hostname }}$"
+        line: "{{ item.ip }}  {{ item.hostname }}"
+        state: present
+      loop: "{{ cluster_hosts_entries }}"
+      tags:
+        - role::os-preconfigure
+        - role::os-preconfigure::etc-hosts
+
+    - name: Set hostname on each node
+      hostname:
+        name: "{{ node_hostname }}"
+      tags:
+        - role::os-preconfigure
+        - role::os-preconfigure::set-hostname
+
+  roles:
+       - role: 01-ubuntu-config-issue
+         tags:
+           - role::os-preconfigure
+           - role::os-preconfigure::configure-issue
+
+       - role: 02-ubuntu-mysql-install
+         tags:
+           - role::mysql::install-mysql
+
+       - role: 03-ubuntu-mysql-innodb-cluster
+         tags:
+           - role::mysql::inodb-cluster
+           - role::mysql::innodb-cluster::pre-configure
+
+       - role: 04-ubuntu-mysql-create-innodb-cluster
+         when: inventory_hostname == master_hostname
+         tags:
+           - role::mysql::inodb-cluster
+           - role::mysql::innodb-cluster::post-configure
+
+        

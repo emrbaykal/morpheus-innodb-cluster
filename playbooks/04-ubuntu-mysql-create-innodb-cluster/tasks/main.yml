@@ -1,0 +1,187 @@
+
+---
+- name: Wait for all cluster hosts to be reachable on MySQL port
+  wait_for:
+    host: "{{ item }}"
+    port: 3306
+    timeout: 480
+    delay: 5
+  loop: "{{ groups['mysql_nodes'] | default([]) }}"
+
+- name: Create MySQL config file with credentials
+  copy:
+    dest: "/tmp/.mylogin.cnf"
+    content: |
+      [client]
+      user={{ innodb_admin_user }}
+      password={{ innodb_admin_password }}
+      host={{ inventory_hostname }}
+    mode: '0600'
+  no_log: true
+
+- name: Create MySQL Shell script for instance configuration
+  copy:
+    dest: "/tmp/configure_instance.js"
+    content: |
+        // MySQL Shell script to check and configure instance
+        var host = "{{ inventory_hostname }}";
+        var clusterAdmin = "{{ innodb_admin_user }}";
+        var password = "{{ innodb_admin_password }}";
+        var dbHosts = JSON.parse('{{ groups["mysql_nodes"] | default([]) | to_json }}');
+        var clusterName = "{{ innodb_cluster_name }}";
+
+        function sleep(milliseconds) {
+        const date = Date.now();
+        let currentDate = null;
+        do {
+            currentDate = Date.now();
+        } while (currentDate - date < milliseconds);
+        }
+        
+        print('\nNumber of Hosts: ' + dbHosts.length );
+        print('\nList of hosts:\n');
+
+        for (var i = 0; i < dbHosts.length; i++) {
+        print("Host " + i + ": " + dbHosts[i] + "\n");
+        }
+ 
+        function setupCluster() {
+            print('\nConfiguring the instances.');
+
+             for (var n = 0; n < dbHosts.length; n++) { print('\n=> ');
+
+                shell.connect({ host: dbHosts[n], user: clusterAdmin, password: password });
+                print("Connected" + dbHosts[n] + "successfully!" + "\n");
+             
+                print("Checking instance configuration...");
+                var result = dba.checkInstanceConfiguration();
+
+                if (result.status == "ok") {
+                  print("Instance is already configured on " + dbHosts[n] + " for InnoDB Cluster usage.");
+                } else {
+                  print("\nConfiguring instance...");
+                  var config_result = dba.configureInstance({host: dbHosts[n], user: clusterAdmin, password: password}, {restart: true})
+                  print("Instance configuration result: " + JSON.stringify(config_result, null, 2));
+                }
+             }
+              print('\nConfiguring Instances completed.\n\n');
+              sleep(5000);      
+              
+              print("Connecting to primary node: " + host);
+              shell.connect({ host: host, user: clusterAdmin, password: password });
+              
+
+              // Now create cluster on primary node
+              try {
+                  print("Setting up InnoDB Cluster on " + host + ".\n\n");
+                  var cluster = dba.createCluster(clusterName);
+                  print("Instance configuration result: " + JSON.stringify(cluster, null, 2));
+              } catch (e) {
+                  print('\nThe InnoDB cluster could not be created.\n');
+                  print(e + '\n');
+              }
+
+              print('Adding instances to the cluster.\n');
+
+              cluster = dba.getCluster();
+
+              for (var i = 0; i < dbHosts.length; i++) { print('\n=> ');
+                 // Skip the primary node - it's already in the cluster
+                 if (dbHosts[i] === host) {
+                     print("Skipping primary node " + host);
+                     continue;
+                 }
+
+                 try {
+                     print("Adding instance " + dbHosts[i] + " to the cluster." + "\n");
+                     add_cluster = cluster.addInstance(dbHosts[i], {recoveryMethod: 'clone'});
+                     print("\nInstance " + dbHosts[i] + " successfully added to the cluster.");
+                  } catch (e) {
+                      print('\nThe Instabce could not be addet to the cluster.\n');
+                      print(e + '\n');
+                  }
+
+              }
+
+
+          }
+
+            setupCluster();
+
+    mode: '0600'
+   # no_log: true
+
+- name: Execute MySQL Shell configuration script
+  shell: >
+       mysqlsh --defaults-file=/tmp/.mylogin.cnf --no-wizard --js --file=/tmp/configure_instance.js
+  register: mysqlsh_output
+  until: mysqlsh_output.rc == 0
+  retries: 5
+  delay: 5
+
+- name: Display MySQL Shell output
+  debug:
+      var: mysqlsh_output.stdout_lines
+
+# ─── Post-Cluster: Status Check & Router Account ───────────
+
+- name: Create MySQL Shell script for cluster status and router account
+  copy:
+    dest: "/tmp/post_cluster_setup.js"
+    content: |
+        var host = "{{ inventory_hostname }}";
+        var clusterAdmin = "{{ innodb_admin_user }}";
+        var password = "{{ innodb_admin_password }}";
+        var routerPassword = "{{ router_password }}";
+
+        // Connect to the primary node
+        print('\n=== Connecting to primary node: ' + host + ' ===\n');
+        shell.connect({ host: host, user: clusterAdmin, password: password });
+
+        // Step 15: Check Cluster Status
+        print('\n=== Cluster Status ===\n');
+        var cluster = dba.getCluster();
+        var status = cluster.status();
+        print(JSON.stringify(status, null, 2));
+
+        // Step 16: Create MySQL Router user
+        print('\n=== Setting up Router Account ===\n');
+        try {
+            cluster.setupRouterAccount('routeruser', {password: routerPassword});
+            print('Router account "routeruser" created successfully.');
+        } catch (e) {
+            // If user already exists, update it
+            try {
+                cluster.setupRouterAccount('routeruser', {password: routerPassword, update: true});
+                print('Router account "routeruser" updated successfully.');
+            } catch (e2) {
+                print('Error setting up router account: ' + e2);
+            }
+        }
+
+        print('\n=== Post-Cluster Setup Complete ===\n');
+    mode: '0600'
+  no_log: true
+
+- name: Execute post-cluster setup script (status check & router account)
+  shell: >
+       mysqlsh --defaults-file=/tmp/.mylogin.cnf --no-wizard --js --file=/tmp/post_cluster_setup.js
+  register: post_cluster_output
+
+- name: Display cluster status and router account output
+  debug:
+      var: post_cluster_output.stdout_lines
+
+# ─── Cleanup ────────────────────────────────────────────────
+
+- name: Clean up temporary files
+  file:
+      path: "{{ item }}"
+      state: absent
+  with_items:
+      - "/tmp/configure_instance.js"
+      - "/tmp/post_cluster_setup.js"
+      - "/tmp/.mylogin.cnf"
+  no_log: true
+
+

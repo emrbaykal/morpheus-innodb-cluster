@@ -1,0 +1,201 @@
+---
+- name: Stop AppArmor service
+  systemd:
+    name: apparmor
+    state: stopped
+
+
+- name: Disable AppArmor service
+  systemd:
+    name: apparmor
+    enabled: no
+
+# ─── Firewall ──────────────────────────────────────────────
+
+- name: Check if ufw is installed
+  command: which ufw
+  register: ufw_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: Disable ufw firewall
+  ufw:
+    state: disabled
+  when: ufw_installed.rc == 0
+
+# ─── Locale ────────────────────────────────────────────────
+
+- name: Ensure en_US.UTF-8 locale is generated
+  locale_gen:
+    name: en_US.UTF-8
+    state: present
+
+- name: Set system locale to en_US.UTF-8
+  command: localectl set-locale LANG=en_US.UTF-8
+  changed_when: false
+
+# ─── NTP Time Sync ─────────────────────────────────────────
+
+- name: Set primary NTP server
+  lineinfile:
+    path: /etc/systemd/timesyncd.conf
+    regexp: '^#?NTP='
+    line: "NTP={{ ntp_primary }}"
+  register: ntp_primary_config
+
+- name: Set fallback NTP server
+  lineinfile:
+    path: /etc/systemd/timesyncd.conf
+    regexp: '^#?FallbackNTP='
+    line: "FallbackNTP={{ ntp_fallback }}"
+  register: ntp_fallback_config
+
+- name: Restart systemd-timesyncd
+  systemd:
+    name: systemd-timesyncd
+    state: restarted
+    enabled: yes
+  when: ntp_primary_config.changed or ntp_fallback_config.changed
+
+- name: Enable NTP synchronization
+  command: timedatectl set-ntp true
+  changed_when: false
+
+# ─── MySQL Installation ───────────────────────────────────
+
+- name: Stop and disable unattended-upgrades service
+  systemd:
+    name: unattended-upgrades
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Kill any running apt/dpkg processes and release locks
+  shell: |
+    # Kill only exact package manager binaries (avoid killing ansible/python)
+    for proc in apt apt-get dpkg unattended-upgrade; do
+      if pgrep -x "$proc" >/dev/null 2>&1; then
+        kill -9 $(pgrep -x "$proc") 2>/dev/null || true
+        echo "Killed $proc"
+      fi
+    done
+    sleep 2
+
+    # Remove stale lock files
+    rm -f /var/lib/dpkg/lock-frontend
+    rm -f /var/lib/dpkg/lock
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/cache/apt/archives/lock
+
+    # Reconfigure any interrupted dpkg
+    dpkg --configure -a 2>/dev/null || true
+
+    echo "Package manager locks cleared."
+  changed_when: false
+
+- name: Download mysql-apt-config package from MySQL repo
+  get_url:
+    url: https://repo.mysql.com/mysql-apt-config_0.8.36-1_all.deb
+    dest: /tmp/mysql-apt-config_0.8.36-1_all.deb
+    mode: '0644'
+
+- name: Install mysql-apt-config package
+  apt:
+    deb: /tmp/mysql-apt-config_0.8.36-1_all.deb
+    state: present
+
+- name: Update apt cache
+  apt:
+    update_cache: yes
+
+- name: Installing Mysql
+  package:
+      name: "{{item}}"
+      state: present
+      update_cache: yes
+  loop:
+    - mysql-server
+    - mysql-client
+    - mysql-shell
+    - python3-mysqldb
+    - libmysqlclient-dev
+
+
+- name: Ensure MySQL service is started and enabled
+  systemd:
+    name: mysql
+    state: started
+    enabled: yes
+
+# ─── Post-Install Verification ─────────────────────────────
+
+- name: List installed MySQL packages
+  shell: apt list --installed 2>/dev/null | grep mysql
+  register: mysql_packages_installed
+  changed_when: false
+
+- name: Display installed MySQL packages
+  debug:
+    var: mysql_packages_installed.stdout_lines
+
+- name: Hold MySQL server package version
+  dpkg_selections:
+    name: mysql-server
+    selection: hold
+
+- name: Verify held packages
+  shell: apt-mark showhold
+  register: held_packages
+  changed_when: false
+
+- name: Display held packages
+  debug:
+    var: held_packages.stdout_lines
+
+- name: Check MySQL service status
+  command: systemctl status mysql
+  register: mysql_service_status
+  changed_when: false
+
+- name: Display MySQL service status
+  debug:
+    var: mysql_service_status.stdout_lines
+
+- name: Create MySQL native password configuration file
+  copy:
+    dest: /etc/mysql/conf.d/enable-mysql-native-password.cnf
+    content: |
+      [mysqld]
+      mysql_native_password=ON
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+      - Restart mysql_service
+
+- name: Flush handlers
+  meta: flush_handlers
+
+- name: Set root user password (first run - empty password)
+  mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    host: localhost
+    login_user: root
+    login_password: ''
+    state: present
+  register: root_pw_first
+  ignore_errors: true
+
+- name: Set root user password (subsequent run - existing password)
+  mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    login_unix_socket: /var/run/mysqld/mysqld.sock
+    host: localhost
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    state: present
+  when: root_pw_first is failed
+
