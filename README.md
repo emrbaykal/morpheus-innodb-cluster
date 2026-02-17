@@ -47,14 +47,9 @@ The playbooks automatically detect the OS family (`ansible_os_family`) and run t
 
 The script automatically detects the local OS and installs the following on the master node if not present:
 
-**Debian/Ubuntu:**
-- `ansible`, `sshpass`, `python3-pip`
-
-**RedHat/CentOS:**
-- `epel-release`, `ansible`, `sshpass`, `python3-pip`
-
-Both:
-- `community.mysql` Ansible collection
+**OS packages:** `sshpass`, `python3-pip`
+**Via pip:** `ansible` (no EPEL dependency)
+**Ansible collection:** `community.mysql`
 
 ## Quick Start
 
