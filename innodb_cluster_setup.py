@@ -375,7 +375,7 @@ def setup_environment():
         else:
             print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
             result = run_command(
-                "pip3 install --break-system-packages ansible", capture=True, check=False
+                "pip3 install ansible", capture=True, check=False
             )
             if result.returncode == 0:
                 print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
