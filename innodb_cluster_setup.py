@@ -43,6 +43,7 @@ REPORT_FILE = SCRIPT_DIR / "cluster_setup_report.txt"
 LOG_FILE = SCRIPT_DIR / "cluster_setup.log"
 
 REQUIRED_PACKAGES_DEBIAN = [
+    "ansible",
     "sshpass",
     "python3-pip",
 ]
@@ -332,21 +333,24 @@ def setup_environment():
                 print_error(f"Failed to install '{pkg}': {result.stderr}")
                 sys.exit(1)
 
-    # Install Ansible via pip (works on both Debian and RedHat without EPEL)
-    pkg = "ansible"
-    sys.stdout.write(f"  {Colors.DIM}Checking '{pkg}'...{Colors.END}")
-    sys.stdout.flush()
-    check = run_command("ansible --version >/dev/null 2>&1", capture=True, check=False)
-    if check.returncode == 0:
-        print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
-    else:
-        print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
-        result = run_command("pip3 install ansible", capture=True, check=False)
-        if result.returncode == 0:
-            print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
+    # On RedHat, install Ansible via pip (no EPEL needed)
+    if os_family == "redhat":
+        pkg = "ansible"
+        sys.stdout.write(f"  {Colors.DIM}Checking '{pkg}'...{Colors.END}")
+        sys.stdout.flush()
+        check = run_command("ansible --version >/dev/null 2>&1", capture=True, check=False)
+        if check.returncode == 0:
+            print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
         else:
-            print_error(f"Failed to install '{pkg}': {result.stderr}")
-            sys.exit(1)
+            print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
+            result = run_command(
+                "pip3 install --break-system-packages ansible", capture=True, check=False
+            )
+            if result.returncode == 0:
+                print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
+            else:
+                print_error(f"Failed to install '{pkg}': {result.stderr}")
+                sys.exit(1)
 
     # Install Ansible collections
     for collection in ANSIBLE_COLLECTIONS:
