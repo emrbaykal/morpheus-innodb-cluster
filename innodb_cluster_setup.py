@@ -22,11 +22,12 @@ import sys
 import json
 import subprocess
 import shutil
-import getpass
 import socket
 import time
 import re
 import signal
+import termios
+import tty
 from datetime import datetime
 from pathlib import Path
 
@@ -80,7 +81,7 @@ class Colors:
 def signal_handler(sig, frame):
     """Handle Ctrl+C gracefully."""
     print(f"\n\n  {Colors.YELLOW}Operation cancelled by user (Ctrl+C).{Colors.END}")
-    print(f"  {Colors.DIM}No changes were applied to the cluster.{Colors.END}\n")
+    print(f"  {Colors.CYAN}No changes were applied to the cluster.{Colors.END}\n")
     sys.exit(130)
 
 
@@ -130,8 +131,8 @@ def print_info(msg):
 
 
 def print_hint(msg):
-    """Print a dim hint message for guidance."""
-    print(f"    {Colors.DIM}{msg}{Colors.END}")
+    """Print a hint message for guidance."""
+    print(f"    {Colors.CYAN}{msg}{Colors.END}")
 
 
 def print_table_row(label, value, mask=False):
@@ -152,15 +153,45 @@ def prompt_input(label, default=None, hint=None):
         return value
 
 
+def read_password_masked(prompt_text):
+    """Read a password from stdin, showing * for each character."""
+    sys.stdout.write(prompt_text)
+    sys.stdout.flush()
+    password = []
+    fd = sys.stdin.fileno()
+    old_settings = termios.tcgetattr(fd)
+    try:
+        tty.setraw(fd)
+        while True:
+            ch = sys.stdin.read(1)
+            if ch in ('\r', '\n'):
+                sys.stdout.write('\n')
+                break
+            elif ch == '\x7f' or ch == '\x08':  # backspace
+                if password:
+                    password.pop()
+                    sys.stdout.write('\b \b')
+            elif ch == '\x03':  # Ctrl+C
+                sys.stdout.write('\n')
+                raise KeyboardInterrupt
+            else:
+                password.append(ch)
+                sys.stdout.write('*')
+            sys.stdout.flush()
+    finally:
+        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
+    return ''.join(password)
+
+
 def prompt_password(label, min_length=4, confirm=True):
-    """Enhanced password prompt with confirmation and validation."""
+    """Enhanced password prompt with masked input (shows *)."""
     while True:
-        password = getpass.getpass(f"    {Colors.BOLD}{label}:{Colors.END} ")
+        password = read_password_masked(f"    {Colors.BOLD}{label}:{Colors.END} ")
         if len(password) < min_length:
             print_error(f"Password must be at least {min_length} characters!")
             continue
         if confirm:
-            password_confirm = getpass.getpass(f"    {Colors.BOLD}{label} (confirm):{Colors.END} ")
+            password_confirm = read_password_masked(f"    {Colors.BOLD}{label} (confirm):{Colors.END} ")
             if password != password_confirm:
                 print_error("Passwords do not match! Please try again.")
                 continue
@@ -309,7 +340,7 @@ def setup_environment():
                        else "yum install -y -q {pkg}")
 
     # Update package cache
-    sys.stdout.write(f"  {Colors.DIM}Updating package lists...{Colors.END}")
+    sys.stdout.write(f"  {Colors.CYAN}Updating package lists...{Colors.END}")
     sys.stdout.flush()
     result = run_command(update_cmd, capture=True, check=False)
     if result.returncode == 0:
@@ -319,7 +350,7 @@ def setup_environment():
 
     # Install required OS packages
     for pkg in required_packages:
-        sys.stdout.write(f"  {Colors.DIM}Checking '{pkg}'...{Colors.END}")
+        sys.stdout.write(f"  {Colors.CYAN}Checking '{pkg}'...{Colors.END}")
         sys.stdout.flush()
         check = run_command(check_cmd.format(pkg=pkg), capture=True, check=False)
         if check.returncode == 0:
@@ -336,7 +367,7 @@ def setup_environment():
     # On RedHat, install Ansible via pip (no EPEL needed)
     if os_family == "redhat":
         pkg = "ansible"
-        sys.stdout.write(f"  {Colors.DIM}Checking '{pkg}'...{Colors.END}")
+        sys.stdout.write(f"  {Colors.CYAN}Checking '{pkg}'...{Colors.END}")
         sys.stdout.flush()
         check = run_command("ansible --version >/dev/null 2>&1", capture=True, check=False)
         if check.returncode == 0:
@@ -354,7 +385,7 @@ def setup_environment():
 
     # Install Ansible collections
     for collection in ANSIBLE_COLLECTIONS:
-        sys.stdout.write(f"  {Colors.DIM}Checking '{collection}'...{Colors.END}")
+        sys.stdout.write(f"  {Colors.CYAN}Checking '{collection}'...{Colors.END}")
         sys.stdout.flush()
         check = run_command(
             f"ansible-galaxy collection list {collection} 2>/dev/null | grep -q '{collection}'",
@@ -708,9 +739,9 @@ def generate_inventory(config):
     for line in lines:
         if "ansible_ssh_pass" in line or "ansible_become_pass" in line:
             key = line.split('=')[0]
-            print(f"    {Colors.DIM}{key}=********{Colors.END}")
+            print(f"    {Colors.CYAN}{key}=********{Colors.END}")
         else:
-            print(f"    {Colors.DIM}{line}{Colors.END}")
+            print(f"    {Colors.CYAN}{line}{Colors.END}")
 
     print_success(f"Inventory file saved: {INVENTORY_FILE}")
 
@@ -726,7 +757,7 @@ def test_connectivity(config):
 
     for i, node in enumerate(nodes):
         label = f"{node['hostname']} ({node['ip']})"
-        sys.stdout.write(f"  {Colors.DIM}[{roles[i]:>8}] Testing {label}...{Colors.END}")
+        sys.stdout.write(f"  {Colors.CYAN}[{roles[i]:>8}] Testing {label}...{Colors.END}")
         sys.stdout.flush()
 
         result = run_command(
