@@ -135,10 +135,10 @@ def print_hint(msg):
     print(f"    {Colors.CYAN}{msg}{Colors.END}")
 
 
-def print_table_row(label, value, mask=False):
+def print_table_row(label, value, mask=False, col1=30, col2=37):
     """Print a formatted table row for summary display."""
     display_value = '*' * 8 if mask else value
-    print(f"  {Colors.BOLD}│{Colors.END} {label:<28} {Colors.BOLD}│{Colors.END} {display_value:<35} {Colors.BOLD}│{Colors.END}")
+    print(f"  {Colors.BOLD}│{Colors.END} {label:<{col1 - 2}} {Colors.BOLD}│{Colors.END} {display_value:<{col2 - 2}} {Colors.BOLD}│{Colors.END}")
 
 
 def prompt_input(label, default=None, hint=None):
@@ -463,40 +463,61 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
     nodes = config["nodes"]
 
     COL1 = 30
-    COL2 = 37
+
+    # Calculate COL2 dynamically based on longest value
+    all_values = [
+        f"{node['hostname']} ({node['ip']})" for node in nodes
+    ] + [
+        config['ssh_user'],
+        config.get('ssh_key_file', ''),
+        config['innodb_admin_user'],
+        config['innodb_cluster_name'],
+        config.get('ntp_primary', 'time.google.com'),
+        config.get('ntp_fallback', 'pool.ntp.org'),
+    ]
+    max_val_len = max(len(v) for v in all_values if v)
+    COL2 = max(37, max_val_len + 4)  # +4 for padding (2 each side)
+
+    def _row(label, value, mask=False):
+        print_table_row(label, value, mask=mask, col1=COL1, col2=COL2)
+
+    def _separator():
+        print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
+
+    def _section_header(text):
+        print(f"  {Colors.BOLD}│{('  ' + text):<{COL1}}│{'':<{COL2}}│{Colors.END}")
 
     # Table top border
     print(f"  {Colors.BOLD}┌{'─' * COL1}┬{'─' * COL2}┐{Colors.END}")
-    print(f"  {Colors.BOLD}│{'  CLUSTER NODES':<{COL1}}│{'':<{COL2}}│{Colors.END}")
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
+    _section_header("CLUSTER NODES")
+    _separator()
     for i, (label, node) in enumerate([("Master Node", nodes[0]), ("Slave Node 1", nodes[1]), ("Slave Node 2", nodes[2])]):
-        val = f"{node['hostname']} ({node['ip']})"
-        print(f"  {Colors.BOLD}│{Colors.END} {label:<{COL1 - 2}} {Colors.BOLD}│{Colors.END} {val:<{COL2 - 2}} {Colors.BOLD}│{Colors.END}")
+        _row(label, f"{node['hostname']} ({node['ip']})")
 
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-    print(f"  {Colors.BOLD}│{'  SSH CONNECTION':<{COL1}}│{'':<{COL2}}│{Colors.END}")
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-    print_table_row("SSH User", config['ssh_user'])
+    _separator()
+    _section_header("SSH CONNECTION")
+    _separator()
+    _row("SSH User", config['ssh_user'])
     if config.get("ssh_key_file"):
-        print_table_row("SSH Key File", config['ssh_key_file'])
+        _row("SSH Key File", config['ssh_key_file'])
     if config.get("ssh_password"):
-        print_table_row("SSH Password", "", mask=True)
-    print_table_row("Sudo Password", config.get('become_password', ''), mask=bool(config.get('become_password')))
+        _row("SSH Password", "", mask=True)
+    _row("Sudo Password", config.get('become_password', ''), mask=bool(config.get('become_password')))
 
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-    print(f"  {Colors.BOLD}│{'  MYSQL CONFIGURATION':<{COL1}}│{'':<{COL2}}│{Colors.END}")
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-    print_table_row("MySQL Root Password", "", mask=True)
-    print_table_row("Cluster Admin User", config['innodb_admin_user'])
-    print_table_row("Cluster Admin Password", "", mask=True)
-    print_table_row("Cluster Name", config['innodb_cluster_name'])
-    print_table_row("Router User (routeruser)", "", mask=True)
+    _separator()
+    _section_header("MYSQL CONFIGURATION")
+    _separator()
+    _row("MySQL Root Password", "", mask=True)
+    _row("Cluster Admin User", config['innodb_admin_user'])
+    _row("Cluster Admin Password", "", mask=True)
+    _row("Cluster Name", config['innodb_cluster_name'])
+    _row("Router User (routeruser)", "", mask=True)
 
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-    print(f"  {Colors.BOLD}│{'  SYSTEM SETTINGS':<{COL1}}│{'':<{COL2}}│{Colors.END}")
-    print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-    print_table_row("NTP Primary Server", config.get('ntp_primary', 'time.google.com'))
-    print_table_row("NTP Fallback Server", config.get('ntp_fallback', 'pool.ntp.org'))
+    _separator()
+    _section_header("SYSTEM SETTINGS")
+    _separator()
+    _row("NTP Primary Server", config.get('ntp_primary', 'time.google.com'))
+    _row("NTP Fallback Server", config.get('ntp_fallback', 'pool.ntp.org'))
     print(f"  {Colors.BOLD}└{'─' * COL1}┴{'─' * COL2}┘{Colors.END}")
     print()
 
