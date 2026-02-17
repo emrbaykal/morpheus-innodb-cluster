@@ -165,14 +165,14 @@ def read_password_masked(prompt_text):
         while True:
             ch = sys.stdin.read(1)
             if ch in ('\r', '\n'):
-                sys.stdout.write('\n')
+                sys.stdout.write('\r\n')
                 break
             elif ch == '\x7f' or ch == '\x08':  # backspace
                 if password:
                     password.pop()
                     sys.stdout.write('\b \b')
             elif ch == '\x03':  # Ctrl+C
-                sys.stdout.write('\n')
+                sys.stdout.write('\r\n')
                 raise KeyboardInterrupt
             else:
                 password.append(ch)
@@ -559,14 +559,14 @@ def collect_variables():
 
     if not ssh_key_input:
         print_info("No SSH key — switching to password authentication.")
-        config["ssh_password"] = prompt_password("SSH Password", confirm=False)
+        config["ssh_password"] = prompt_password("SSH Password")
         config["ssh_key_file"] = ""
     else:
         config["ssh_key_file"] = ssh_key_input
 
     print()
     if prompt_yes_no("Does the SSH user require a sudo password?", default_yes=False):
-        config["become_password"] = prompt_password("Sudo Password", confirm=False)
+        config["become_password"] = prompt_password("Sudo Password")
     else:
         config["become_password"] = ""
 
@@ -655,14 +655,14 @@ def get_configuration():
                 if not os.path.exists(config["ssh_key_file"]):
                     print_warning(f"SSH key file not found: {config['ssh_key_file']}")
                     if prompt_yes_no("Connect with SSH password instead?", default_yes=True):
-                        config["ssh_password"] = prompt_password("SSH Password", confirm=False)
+                        config["ssh_password"] = prompt_password("SSH Password")
                         config["ssh_key_file"] = ""
                     else:
                         print_error("An SSH key file or password is required!")
                         sys.exit(1)
                 print()
                 if prompt_yes_no("Does the SSH user require a sudo password?", default_yes=False):
-                    config["become_password"] = prompt_password("Sudo Password", confirm=False)
+                    config["become_password"] = prompt_password("Sudo Password")
                 else:
                     config["become_password"] = ""
             elif section == '3':
