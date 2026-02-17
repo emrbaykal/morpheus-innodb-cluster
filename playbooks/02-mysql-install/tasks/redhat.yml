@@ -72,26 +72,30 @@
 
 # ─── MySQL Installation ───────────────────────────────────
 
-- name: Determine MySQL repo RPM URL based on EL version
-  set_fact:
-    mysql_repo_rpm: "https://repo.mysql.com/mysql84-community-release-el{{ ansible_distribution_major_version }}-1.noarch.rpm"
-
-- name: Install MySQL YUM repository
-  yum:
-    name: "{{ mysql_repo_rpm }}"
-    state: present
-    disable_gpg_check: yes
+- name: Enable CodeReady Builder repository
+  command: >
+    dnf config-manager --set-enabled
+    {{ 'crb' if ansible_distribution in ['Rocky', 'AlmaLinux'] else 'codeready-builder-for-rhel-' + ansible_distribution_major_version + '-x86_64-rpms' }}
+  changed_when: false
 
 - name: Install MySQL packages (RedHat)
   package:
-    name: "{{ item }}"
+    name:
+      - mysql-server
+      - mysql
+      - python3-PyMySQL
+      - mysql-devel
     state: present
-  loop:
-    - mysql-community-server
-    - mysql-community-client
-    - mysql-shell
-    - python3-PyMySQL
-    - mysql-community-devel
+
+- name: Determine mysql-shell RPM URL based on EL version
+  set_fact:
+    mysql_shell_rpm: "https://repo.mysql.com/yum/mysql-tools-community/el/{{ ansible_distribution_major_version }}/x86_64/mysql-shell-8.0.44-1.el{{ ansible_distribution_major_version }}.x86_64.rpm"
+
+- name: Install mysql-shell from MySQL repository
+  yum:
+    name: "{{ mysql_shell_rpm }}"
+    state: present
+    disable_gpg_check: yes
 
 # ─── Post-Install Verification ─────────────────────────────
 
@@ -111,7 +115,7 @@
 
 - name: Hold MySQL server package version
   community.general.yum_versionlock:
-    name: mysql-community-server
+    name: mysql-server
     state: present
 
 - name: Verify held packages
