@@ -26,21 +26,21 @@
         - role::os-preconfigure::set-hostname
 
   roles:
-       - role: 01-ubuntu-config-issue
+       - role: 01-config-issue
          tags:
            - role::os-preconfigure
            - role::os-preconfigure::configure-issue
 
-       - role: 02-ubuntu-mysql-install
+       - role: 02-mysql-install
          tags:
            - role::mysql::install-mysql
 
-       - role: 03-ubuntu-mysql-innodb-cluster
+       - role: 03-mysql-innodb-cluster
          tags:
            - role::mysql::inodb-cluster
            - role::mysql::innodb-cluster::pre-configure
 
-       - role: 04-ubuntu-mysql-create-innodb-cluster
+       - role: 04-mysql-create-innodb-cluster
          when: inventory_hostname == master_hostname
          tags:
            - role::mysql::inodb-cluster

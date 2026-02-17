@@ -38,11 +38,18 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 PLAYBOOKS_DIR = SCRIPT_DIR / "playbooks"
 CONFIG_FILE = SCRIPT_DIR / "cluster_config.json"
 INVENTORY_FILE = PLAYBOOKS_DIR / "inventory.ini"
-PLAYBOOK_FILE = PLAYBOOKS_DIR / "ubuntu-mysql-innodb.yml"
+PLAYBOOK_FILE = PLAYBOOKS_DIR / "mysql-innodb.yml"
 REPORT_FILE = SCRIPT_DIR / "cluster_setup_report.txt"
 LOG_FILE = SCRIPT_DIR / "cluster_setup.log"
 
-REQUIRED_PACKAGES = [
+REQUIRED_PACKAGES_DEBIAN = [
+    "ansible",
+    "sshpass",
+    "python3-pip",
+]
+
+REQUIRED_PACKAGES_REDHAT = [
+    "epel-release",
     "ansible",
     "sshpass",
     "python3-pip",
@@ -250,6 +257,29 @@ def format_duration(seconds):
 
 # ─── Environment Setup ───────────────────────────────────────────────────────
 
+def detect_os_family():
+    """Detect the OS family of the local machine (where the script runs).
+
+    Returns 'debian' or 'redhat'. Exits if unsupported.
+    """
+    os_release = Path("/etc/os-release")
+    if os_release.exists():
+        content = os_release.read_text().lower()
+        if any(d in content for d in ("ubuntu", "debian")):
+            return "debian"
+        if any(d in content for d in ("rhel", "centos", "rocky", "alma", "fedora", "red hat")):
+            return "redhat"
+
+    # Fallback: check for package managers
+    if shutil.which("apt-get"):
+        return "debian"
+    if shutil.which("dnf") or shutil.which("yum"):
+        return "redhat"
+
+    print_error("Unsupported operating system. Only Debian/Ubuntu and RedHat/CentOS are supported.")
+    sys.exit(1)
+
+
 def check_root():
     """Check if running as root or with sudo."""
     if os.geteuid() != 0:
@@ -263,27 +293,42 @@ def check_root():
 def setup_environment():
     """Install required packages and Ansible collections."""
     print_step(1, "ENVIRONMENT SETUP")
+
+    os_family = detect_os_family()
+    print_info(f"Detected OS family: {os_family.upper()}")
     print_info("Checking and installing prerequisites...\n")
 
-    # Update apt cache
+    if os_family == "debian":
+        required_packages = REQUIRED_PACKAGES_DEBIAN
+        update_cmd = "apt-get update -qq"
+        check_cmd = "dpkg -l {pkg} 2>/dev/null | grep -q '^ii'"
+        install_cmd = "apt-get install -y -qq {pkg}"
+    else:
+        required_packages = REQUIRED_PACKAGES_REDHAT
+        update_cmd = "dnf makecache -q" if shutil.which("dnf") else "yum makecache -q"
+        check_cmd = "rpm -q {pkg} >/dev/null 2>&1"
+        install_cmd = ("dnf install -y -q {pkg}" if shutil.which("dnf")
+                       else "yum install -y -q {pkg}")
+
+    # Update package cache
     sys.stdout.write(f"  {Colors.DIM}Updating package lists...{Colors.END}")
     sys.stdout.flush()
-    result = run_command("apt-get update -qq", capture=True, check=False)
+    result = run_command(update_cmd, capture=True, check=False)
     if result.returncode == 0:
         print(f"\r  {Colors.GREEN}✓ Package lists updated.{Colors.END}          ")
     else:
         print(f"\r  {Colors.YELLOW}⚠ Package list update had issues, continuing...{Colors.END}")
 
     # Install required packages
-    for pkg in REQUIRED_PACKAGES:
+    for pkg in required_packages:
         sys.stdout.write(f"  {Colors.DIM}Checking '{pkg}'...{Colors.END}")
         sys.stdout.flush()
-        check = run_command(f"dpkg -l {pkg} 2>/dev/null | grep -q '^ii'", capture=True, check=False)
+        check = run_command(check_cmd.format(pkg=pkg), capture=True, check=False)
         if check.returncode == 0:
             print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
         else:
             print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
-            result = run_command(f"apt-get install -y -qq {pkg}", capture=True, check=False)
+            result = run_command(install_cmd.format(pkg=pkg), capture=True, check=False)
             if result.returncode == 0:
                 print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
             else:
@@ -329,11 +374,11 @@ def setup_environment():
         print_hint(f"  {SCRIPT_DIR.name}/")
         print_hint(f"    innodb_cluster_setup.py")
         print_hint(f"    playbooks/")
-        print_hint(f"      ubuntu-mysql-innodb.yml")
-        print_hint(f"      01-ubuntu-config-issue/")
-        print_hint(f"      02-ubuntu-mysql-install/")
-        print_hint(f"      03-ubuntu-mysql-innodb-cluster/")
-        print_hint(f"      04-ubuntu-mysql-create-innodb-cluster/")
+        print_hint(f"      mysql-innodb.yml")
+        print_hint(f"      01-config-issue/")
+        print_hint(f"      02-mysql-install/")
+        print_hint(f"      03-mysql-innodb-cluster/")
+        print_hint(f"      04-mysql-create-innodb-cluster/")
         sys.exit(1)
 
     if not PLAYBOOK_FILE.exists():
@@ -403,7 +448,7 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
     print(f"  {Colors.BOLD}│{'  SYSTEM SETTINGS':<{COL1}}│{'':<{COL2}}│{Colors.END}")
     print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
     print_table_row("NTP Primary Server", config.get('ntp_primary', 'time.google.com'))
-    print_table_row("NTP Fallback Server", config.get('ntp_fallback', 'ntp.ubuntu.com'))
+    print_table_row("NTP Fallback Server", config.get('ntp_fallback', 'pool.ntp.org'))
     print(f"  {Colors.BOLD}└{'─' * COL1}┴{'─' * COL2}┘{Colors.END}")
     print()
 
@@ -507,7 +552,7 @@ def collect_variables():
     print_hint("NTP time synchronization servers for all cluster nodes.\n")
 
     config["ntp_primary"] = prompt_input("Primary NTP Server", default="time.google.com")
-    config["ntp_fallback"] = prompt_input("Fallback NTP Server", default="ntp.ubuntu.com")
+    config["ntp_fallback"] = prompt_input("Fallback NTP Server", default="pool.ntp.org")
 
     return config
 
@@ -584,7 +629,7 @@ def get_configuration():
             elif section == '5':
                 print(f"\n  {Colors.YELLOW}{Colors.BOLD}Re-entering: System Settings{Colors.END}\n")
                 config["ntp_primary"] = prompt_input("Primary NTP Server", default=config.get("ntp_primary", "time.google.com"))
-                config["ntp_fallback"] = prompt_input("Fallback NTP Server", default=config.get("ntp_fallback", "ntp.ubuntu.com"))
+                config["ntp_fallback"] = prompt_input("Fallback NTP Server", default=config.get("ntp_fallback", "pool.ntp.org"))
             elif section == 'a':
                 config = collect_variables()
                 config["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
@@ -716,7 +761,7 @@ def build_extra_vars(config):
         "cluster_hosts_entries": hosts_entries,   # for /etc/hosts population
         "router_password": config.get("router_password", ""),
         "ntp_primary": config.get("ntp_primary", "time.google.com"),
-        "ntp_fallback": config.get("ntp_fallback", "ntp.ubuntu.com"),
+        "ntp_fallback": config.get("ntp_fallback", "pool.ntp.org"),
     }
     return json.dumps(extra_vars)
 
@@ -862,11 +907,11 @@ def generate_report(config, returncode, output_lines, elapsed):
     report_lines.append("-" * 70)
     report_lines.append("  APPLIED ROLES")
     report_lines.append("-" * 70)
-    report_lines.append("  1. pre_tasks                              /etc/hosts + hostname")
-    report_lines.append("  2. 01-ubuntu-config-issue                 SSH banner configuration")
-    report_lines.append("  3. 02-ubuntu-mysql-install                Firewall, Locale, NTP, MySQL install")
-    report_lines.append("  4. 03-ubuntu-mysql-innodb-cluster         InnoDB Cluster pre-configuration")
-    report_lines.append("  5. 04-ubuntu-mysql-create-innodb-cluster  Cluster creation + Router account")
+    report_lines.append("  1. pre_tasks                          /etc/hosts + hostname")
+    report_lines.append("  2. 01-config-issue                    SSH banner configuration")
+    report_lines.append("  3. 02-mysql-install                   Firewall, Locale, NTP, MySQL install")
+    report_lines.append("  4. 03-mysql-innodb-cluster            InnoDB Cluster pre-configuration")
+    report_lines.append("  5. 04-mysql-create-innodb-cluster     Cluster creation + Router account")
 
     report_lines.append("")
     report_lines.append("-" * 70)
@@ -893,7 +938,7 @@ def generate_report(config, returncode, output_lines, elapsed):
         report_lines.append("  Troubleshooting tips:")
         report_lines.append("    - SSH error       : Verify SSH key/password and user permissions")
         report_lines.append("    - DNS error       : Check /etc/hosts on all nodes")
-        report_lines.append("    - Install error   : Check internet connectivity and apt sources")
+        report_lines.append("    - Install error   : Check internet connectivity and package sources")
         report_lines.append("    - Firewall        : Ensure ports 3306, 33060, 33061 are open")
         report_lines.append("    - Cluster error   : Check MySQL Shell output above for details")
 

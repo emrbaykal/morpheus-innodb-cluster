@@ -1,0 +1,49 @@
+---
+# Common MySQL tasks for all OS families
+
+# ─── Start MySQL Service ──────────────────────────────────
+
+- name: Ensure MySQL service is started and enabled
+  systemd:
+    name: "{{ mysql_service_name }}"
+    state: started
+    enabled: yes
+
+- name: Check MySQL service status
+  command: "systemctl status {{ mysql_service_name }}"
+  register: mysql_service_status
+  changed_when: false
+
+- name: Display MySQL service status
+  debug:
+    var: mysql_service_status.stdout_lines
+
+# ─── Flush handlers before root password setup ────────────
+
+- name: Flush handlers
+  meta: flush_handlers
+
+# ─── Root Password Setup (Idempotent) ─────────────────────
+
+- name: Set root user password (first run - empty password)
+  mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    login_unix_socket: "{{ mysql_socket_path }}"
+    host: localhost
+    login_user: root
+    login_password: ''
+    state: present
+  register: root_pw_first
+  ignore_errors: true
+
+- name: Set root user password (subsequent run - existing password)
+  mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    login_unix_socket: "{{ mysql_socket_path }}"
+    host: localhost
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    state: present
+  when: root_pw_first is failed

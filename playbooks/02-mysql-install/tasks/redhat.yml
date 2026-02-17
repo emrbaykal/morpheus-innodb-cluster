@@ -1,0 +1,138 @@
+---
+# RedHat/CentOS/Rocky/Alma specific tasks for MySQL installation
+
+# ─── SELinux ──────────────────────────────────────────────
+
+- name: Set SELinux to permissive mode
+  selinux:
+    policy: targeted
+    state: permissive
+  ignore_errors: true
+
+# ─── Firewall ──────────────────────────────────────────────
+
+- name: Check if firewalld is installed
+  command: which firewall-cmd
+  register: firewalld_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: Stop and disable firewalld
+  systemd:
+    name: firewalld
+    state: stopped
+    enabled: no
+  when: firewalld_installed.rc == 0
+  ignore_errors: true
+
+# ─── Locale ────────────────────────────────────────────────
+
+- name: Ensure en_US.UTF-8 locale is generated
+  command: localedef -i en_US -f UTF-8 en_US.UTF-8
+  changed_when: false
+  ignore_errors: true
+
+- name: Set system locale to en_US.UTF-8
+  command: localectl set-locale LANG=en_US.UTF-8
+  changed_when: false
+
+# ─── NTP Time Sync (chrony) ───────────────────────────────
+
+- name: Install chrony
+  package:
+    name: chrony
+    state: present
+
+- name: Set primary NTP server in chrony
+  lineinfile:
+    path: /etc/chrony.conf
+    regexp: '^(server|pool)\s+'
+    line: "server {{ ntp_primary }} iburst"
+    insertafter: '^#.*server'
+  register: ntp_primary_config
+
+- name: Set fallback NTP server in chrony
+  lineinfile:
+    path: /etc/chrony.conf
+    regexp: '^server\s+{{ ntp_fallback }}'
+    line: "server {{ ntp_fallback }} iburst"
+    insertafter: '^server\s+{{ ntp_primary }}'
+  register: ntp_fallback_config
+
+- name: Restart chronyd
+  systemd:
+    name: chronyd
+    state: restarted
+    enabled: yes
+  when: ntp_primary_config.changed or ntp_fallback_config.changed
+
+- name: Enable NTP synchronization
+  command: timedatectl set-ntp true
+  changed_when: false
+
+# ─── MySQL Installation ───────────────────────────────────
+
+- name: Determine MySQL repo RPM URL based on EL version
+  set_fact:
+    mysql_repo_rpm: "https://repo.mysql.com/mysql84-community-release-el{{ ansible_distribution_major_version }}-1.noarch.rpm"
+
+- name: Install MySQL YUM repository
+  yum:
+    name: "{{ mysql_repo_rpm }}"
+    state: present
+    disable_gpg_check: yes
+
+- name: Install MySQL packages (RedHat)
+  package:
+    name: "{{ item }}"
+    state: present
+  loop:
+    - mysql-community-server
+    - mysql-community-client
+    - mysql-shell
+    - python3-PyMySQL
+    - mysql-community-devel
+
+# ─── Post-Install Verification ─────────────────────────────
+
+- name: List installed MySQL packages
+  shell: rpm -qa | grep -i mysql
+  register: mysql_packages_installed
+  changed_when: false
+
+- name: Display installed MySQL packages
+  debug:
+    var: mysql_packages_installed.stdout_lines
+
+- name: Install yum-plugin-versionlock
+  package:
+    name: "{{ 'yum-plugin-versionlock' if ansible_distribution_major_version | int <= 7 else 'python3-dnf-plugin-versionlock' }}"
+    state: present
+
+- name: Hold MySQL server package version
+  community.general.yum_versionlock:
+    name: mysql-community-server
+    state: present
+
+- name: Verify held packages
+  shell: "{{ 'yum versionlock list' if ansible_distribution_major_version | int <= 7 else 'dnf versionlock list' }}"
+  register: held_packages
+  changed_when: false
+
+- name: Display held packages
+  debug:
+    var: held_packages.stdout_lines
+
+# ─── MySQL Native Password Plugin ─────────────────────────
+
+- name: Create MySQL native password configuration file
+  copy:
+    dest: /etc/my.cnf.d/enable-mysql-native-password.cnf
+    content: |
+      [mysqld]
+      mysql_native_password=ON
+    owner: root
+    group: root
+    mode: '0644'
+  notify:
+    - Restart mysql_service

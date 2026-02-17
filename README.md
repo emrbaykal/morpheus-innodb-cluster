@@ -1,6 +1,6 @@
 # MySQL InnoDB Cluster Setup
 
-Automated deployment of a 3-node MySQL InnoDB Cluster on Ubuntu using Ansible, orchestrated by a single Python script.
+Automated deployment of a 3-node MySQL InnoDB Cluster on Ubuntu and RedHat-based systems using Ansible, orchestrated by a single Python script.
 
 ## Directory Structure
 
@@ -9,11 +9,16 @@ ansible/
 ├── innodb_cluster_setup.py            # Main orchestrator script
 ├── README.md
 ├── playbooks/
-│   ├── ubuntu-mysql-innodb.yml        # Main Ansible playbook
-│   ├── 01-ubuntu-config-issue/        # Role: SSH banner configuration
-│   ├── 02-ubuntu-mysql-install/       # Role: OS hardening + MySQL installation
-│   ├── 03-ubuntu-mysql-innodb-cluster/# Role: InnoDB Cluster pre-configuration
-│   └── 04-ubuntu-mysql-create-innodb-cluster/  # Role: Cluster creation (master only)
+│   ├── mysql-innodb.yml               # Main Ansible playbook
+│   ├── 01-config-issue/               # Role: SSH banner configuration
+│   ├── 02-mysql-install/              # Role: OS hardening + MySQL installation
+│   │   └── tasks/
+│   │       ├── main.yml               # Dispatcher (includes OS-specific tasks)
+│   │       ├── debian.yml             # Debian/Ubuntu specific tasks
+│   │       ├── redhat.yml             # RedHat/CentOS/Rocky/Alma specific tasks
+│   │       └── common.yml             # Shared tasks (service start, root password)
+│   ├── 03-mysql-innodb-cluster/       # Role: InnoDB Cluster pre-configuration
+│   └── 04-mysql-create-innodb-cluster/# Role: Cluster creation (master only)
 │
 │   # Generated at runtime:
 │   └── inventory.ini
@@ -24,17 +29,31 @@ ansible/
 └── cluster_setup_report.txt           # Post-deployment summary report
 ```
 
+## Supported Operating Systems
+
+| OS Family | Tested Distributions |
+|-----------|---------------------|
+| Debian    | Ubuntu 22.04+, Debian 12+ |
+| RedHat    | RHEL 8/9, CentOS Stream 8/9, Rocky Linux 8/9, AlmaLinux 8/9 |
+
+The playbooks automatically detect the OS family (`ansible_os_family`) and run the appropriate tasks for each distribution.
+
 ## Prerequisites
 
-- **OS:** Ubuntu 22.04+ on all 3 target nodes
+- **OS:** Ubuntu 22.04+ or RedHat/CentOS 8+ on all 3 target nodes
 - **Access:** SSH connectivity from the master node to all nodes (key-based or password)
 - **Privileges:** `sudo` access on all target nodes
-- **Network:** Internet access on targets for MySQL APT repository download
+- **Network:** Internet access on targets for MySQL repository download
 
-The script automatically installs the following on the master node if not present:
-- `ansible`
-- `sshpass`
-- `python3-pip`
+The script automatically detects the local OS and installs the following on the master node if not present:
+
+**Debian/Ubuntu:**
+- `ansible`, `sshpass`, `python3-pip`
+
+**RedHat/CentOS:**
+- `epel-release`, `ansible`, `sshpass`, `python3-pip`
+
+Both:
 - `community.mysql` Ansible collection
 
 ## Quick Start
@@ -47,7 +66,7 @@ The script guides you through an interactive wizard with 7 steps:
 
 | Step | Description |
 |------|-------------|
-| 1/7  | Environment setup — installs prerequisites |
+| 1/7  | Environment setup — detects OS, installs prerequisites |
 | 2/7  | Configuration — collects cluster variables in 5 sections |
 | 3/7  | Inventory generation — creates Ansible inventory from inputs |
 | 4/7  | SSH connectivity test — verifies all nodes are reachable |
@@ -82,7 +101,7 @@ For each of the 3 nodes (1 master + 2 slaves):
 
 ### Section 5: System Settings
 - **Primary NTP Server** — default: `time.google.com`
-- **Fallback NTP Server** — default: `ntp.ubuntu.com`
+- **Fallback NTP Server** — default: `pool.ntp.org`
 
 All values are saved to `cluster_config.json` (mode `0600`). On subsequent runs, the script offers to reuse the saved configuration.
 
@@ -94,27 +113,38 @@ All values are saved to `cluster_config.json` (mode `0600`). On subsequent runs,
 
 ### Role 01: SSH Banner Configuration
 - Configures SSH login banner (`/etc/issue`, `/etc/issue.net`)
+- OS-aware SSH service restart (`ssh` on Debian, `sshd` on RedHat)
 
 ### Role 02: MySQL Installation
-- Stop and disable AppArmor
-- Disable UFW firewall
-- Set locale to `en_US.UTF-8`
-- Configure NTP time synchronization (`systemd-timesyncd`)
-- Wait for dpkg/apt locks to be released
-- Stop `unattended-upgrades` service
-- Download and install `mysql-apt-config` from `repo.mysql.com`
-- Install MySQL Server, Client, Shell, and dependencies
-- Hold MySQL server package version (`apt-mark hold`)
-- Enable `mysql_native_password` plugin
+
+OS-specific tasks are automatically selected based on `ansible_os_family`:
+
+| Task | Debian/Ubuntu | RedHat/CentOS |
+|------|--------------|---------------|
+| Security framework | Stop & disable AppArmor | Set SELinux to permissive |
+| Firewall | Disable UFW | Stop & disable firewalld |
+| Locale | `locale_gen` module | `localedef` command |
+| NTP | `systemd-timesyncd` | `chrony` |
+| Package cleanup | Stop `unattended-upgrades`, clear apt/dpkg locks | — |
+| MySQL repo | `mysql-apt-config` deb from `repo.mysql.com` | MySQL YUM repo RPM (EL8/EL9 auto-detected) |
+| Package install | `apt`: mysql-server, mysql-client, mysql-shell, python3-mysqldb, libmysqlclient-dev | `dnf`/`yum`: mysql-community-server, mysql-community-client, mysql-shell, python3-PyMySQL, mysql-community-devel |
+| Version lock | `dpkg_selections` hold | `yum versionlock` |
+| Native password config | `/etc/mysql/conf.d/` | `/etc/my.cnf.d/` |
+
+Common tasks (both OS families):
+- Start and enable MySQL service (`mysql` on Debian, `mysqld` on RedHat)
 - Set MySQL root password (idempotent — works on first run and re-runs)
-- Verify installed packages, held packages, and service status
+- Verify service status
 
 ### Role 03: InnoDB Cluster Pre-configuration
 - Create cluster admin user with full privileges
 - Remove anonymous MySQL users and test database
 - Set `sql_generate_invisible_primary_key = 1`
 - Calculate `innodb_buffer_pool_size` as 80% of total RAM (dynamic)
-- Write InnoDB-optimized `mysqld.cnf` with tuned parameters:
+- Write InnoDB-optimized config file (OS-aware path):
+  - Debian: `/etc/mysql/mysql.conf.d/innodb-mysqld.cnf`
+  - RedHat: `/etc/my.cnf.d/innodb-mysqld.cnf`
+- Tuned parameters:
   - `bind-address = 0.0.0.0`
   - `max_connections = 451`
   - `innodb_use_fdatasync = ON`
@@ -171,8 +201,7 @@ mysqlrouter --bootstrap routeruser@<master-ip>:3306 --user=mysqlrouter
 | Issue | Solution |
 |-------|----------|
 | `Missing sudo password` | Re-run and answer "yes" to sudo password prompt |
-| `dpkg lock` error | Script now waits for locks automatically; also disables `unattended-upgrades` |
-| `decimal.Decimal` error in verification | Fixed — verification uses `shell` + `mysql` instead of `mysql_query` module |
+| `dpkg lock` error (Debian) | Script now waits for locks automatically; also disables `unattended-upgrades` |
 | Master node `failed=1` on re-run | Root password task is now idempotent (tries empty, then existing password) |
 | Role 04 skipped on all nodes | Ensure `master_hostname` matches the master node's IP in inventory |
 | Too verbose output | Ansible runs without `-v` flag by default |
