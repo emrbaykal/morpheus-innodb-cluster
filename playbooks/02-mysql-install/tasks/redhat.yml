@@ -134,7 +134,7 @@
     dest: /etc/my.cnf.d/enable-mysql-native-password.cnf
     content: |
       [mysqld]
-      mysql_native_password=ON
+      default_authentication_plugin=mysql_native_password
     owner: root
     group: root
     mode: '0644'
