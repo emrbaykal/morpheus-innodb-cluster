@@ -72,8 +72,6 @@
 - name: Flush handlers
   meta: flush_handlers
 
-# ─── Post-Restart Verification ──────────────────────────────
-
 - name: Verify applied MySQL parameters
   shell: >
     mysql -u root -p'{{ mysql_root_password }}' -N -e

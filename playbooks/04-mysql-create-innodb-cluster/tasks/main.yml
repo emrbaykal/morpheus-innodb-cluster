@@ -123,7 +123,6 @@
   debug:
       var: mysqlsh_output.stdout_lines
 
-# ─── Post-Cluster: Status Check & Router Account ───────────
 
 - name: Create MySQL Shell script for cluster status and router account
   copy:
