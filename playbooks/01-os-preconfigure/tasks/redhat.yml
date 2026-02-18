@@ -60,10 +60,10 @@
   ignore_errors: true
 
 
-- name: Ensure en_US.UTF-8 locale is generated
-  command: localedef -i en_US -f UTF-8 en_US.UTF-8
-  changed_when: false
-  ignore_errors: true
+- name: Install English locale pack (RHEL 8/9)
+  package:
+    name: glibc-langpack-en
+    state: present
 
 - name: Set system locale to en_US.UTF-8
   command: localectl set-locale LANG=en_US.UTF-8

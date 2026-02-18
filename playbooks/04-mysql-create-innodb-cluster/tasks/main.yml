@@ -46,58 +46,58 @@
         }
  
         function setupCluster() {
-            print('\nConfiguring the instances.');
+            print('\nConfiguring the instances.\n');
 
-             for (var n = 0; n < dbHosts.length; n++) { print('\n=> ');
+             for (var n = 0; n < dbHosts.length; n++) {
+                print('\n=> Connecting to ' + dbHosts[n] + '...\n');
 
                 shell.connect({ host: dbHosts[n], user: clusterAdmin, password: password });
-                print("Connected" + dbHosts[n] + "successfully!" + "\n");
-             
-                print("Checking instance configuration...");
+                print("Connected to " + dbHosts[n] + " successfully!\n");
+
+                print("Checking instance configuration...\n");
                 var result = dba.checkInstanceConfiguration();
 
                 if (result.status == "ok") {
-                  print("Instance is already configured on " + dbHosts[n] + " for InnoDB Cluster usage.");
+                  print("\nInstance " + dbHosts[n] + " is already configured for InnoDB Cluster usage.\n");
                 } else {
-                  print("\nConfiguring instance...");
-                  var config_result = dba.configureInstance({host: dbHosts[n], user: clusterAdmin, password: password}, {restart: true})
-                  print("Instance configuration result: " + JSON.stringify(config_result, null, 2));
+                  print("\nConfiguring instance...\n");
+                  dba.configureInstance({host: dbHosts[n], user: clusterAdmin, password: password}, {restart: true});
+                  print("\nInstance " + dbHosts[n] + " configured and restarted successfully.\n");
                 }
              }
               print('\nConfiguring Instances completed.\n\n');
-              sleep(5000);      
-              
-              print("Connecting to primary node: " + host);
+              sleep(5000);
+
+              print("\nConnecting to primary node: " + host + "\n");
               shell.connect({ host: host, user: clusterAdmin, password: password });
-              
 
               // Now create cluster on primary node
               try {
-                  print("Setting up InnoDB Cluster on " + host + ".\n\n");
+                  print("\nSetting up InnoDB Cluster on " + host + ".\n");
                   var cluster = dba.createCluster(clusterName);
-                  print("Instance configuration result: " + JSON.stringify(cluster, null, 2));
+                  print("\nCluster '" + clusterName + "' created successfully.\n");
               } catch (e) {
                   print('\nThe InnoDB cluster could not be created.\n');
                   print(e + '\n');
               }
 
-              print('Adding instances to the cluster.\n');
+              print('\nAdding instances to the cluster.\n');
 
               cluster = dba.getCluster();
 
-              for (var i = 0; i < dbHosts.length; i++) { print('\n=> ');
+              for (var i = 0; i < dbHosts.length; i++) {
                  // Skip the primary node - it's already in the cluster
                  if (dbHosts[i] === host) {
-                     print("Skipping primary node " + host);
+                     print("\n=> Skipping primary node " + host + "\n");
                      continue;
                  }
 
                  try {
-                     print("Adding instance " + dbHosts[i] + " to the cluster." + "\n");
-                     add_cluster = cluster.addInstance(dbHosts[i], {recoveryMethod: 'clone'});
-                     print("\nInstance " + dbHosts[i] + " successfully added to the cluster.");
+                     print("\n=> Adding instance " + dbHosts[i] + " to the cluster.\n");
+                     cluster.addInstance(dbHosts[i], {recoveryMethod: 'clone'});
+                     print("\nInstance " + dbHosts[i] + " successfully added to the cluster.\n");
                   } catch (e) {
-                      print('\nThe Instabce could not be addet to the cluster.\n');
+                      print('\nThe instance could not be added to the cluster.\n');
                       print(e + '\n');
                   }
 
