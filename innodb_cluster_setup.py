@@ -782,7 +782,8 @@ def test_connectivity(config):
         sys.stdout.flush()
 
         result = run_command(
-            f"ansible {node['ip']} -i {INVENTORY_FILE} -m ping --one-line",
+            f"ansible {node['ip']} -i {INVENTORY_FILE} -m ping --one-line"
+            f" -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no -T'\"",
             capture=True, check=False
         )
         if result.returncode == 0 and "SUCCESS" in (result.stdout or ""):
