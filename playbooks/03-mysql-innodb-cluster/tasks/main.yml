@@ -1,17 +1,15 @@
 ---
 
-- name: Create Cluster Admin
-  community.mysql.mysql_user:
-    name: "{{ innodb_admin_user }}"
-    password: "{{ innodb_admin_password }}"
-    plugin: caching_sha2_password
-    priv: '*.*:ALL,GRANT'
-    host: '%'
-    append_privs: yes
+- name: Create Cluster Admin user
+  community.mysql.mysql_query:
     login_user: root
     login_password: "{{ mysql_root_password }}"
     login_unix_socket: "{{ mysql_socket_path }}"
-    state: present
+    query:
+      - "CREATE USER IF NOT EXISTS '{{ innodb_admin_user }}'@'%' IDENTIFIED WITH caching_sha2_password BY '{{ innodb_admin_password }}'"
+      - "GRANT ALL PRIVILEGES ON *.* TO '{{ innodb_admin_user }}'@'%' WITH GRANT OPTION"
+      - "FLUSH PRIVILEGES"
+  no_log: true
 
 - name: Delete blank users
   mysql_query:
