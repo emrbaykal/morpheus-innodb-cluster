@@ -1,0 +1,123 @@
+---
+
+- name: Ensure sshd_config.d directory exists (Ubuntu 24.04)
+  file:
+    path: /etc/ssh/sshd_config.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Set SSH Banner via drop-in config (Ubuntu 24.04)
+  copy:
+    dest: /etc/ssh/sshd_config.d/99-banner.conf
+    content: |
+      Banner /etc/issue.net
+    owner: root
+    group: root
+    mode: '0644'
+  notify: restart_ssh_client
+
+
+- name: Stop AppArmor service
+  systemd:
+    name: apparmor
+    state: stopped
+
+- name: Disable AppArmor service
+  systemd:
+    name: apparmor
+    enabled: no
+
+
+- name: Check if ufw is installed
+  command: which ufw
+  register: ufw_installed
+  ignore_errors: true
+  changed_when: false
+
+- name: Disable ufw firewall
+  ufw:
+    state: disabled
+  when: ufw_installed.rc == 0
+
+
+- name: Ensure en_US.UTF-8 locale is generated
+  locale_gen:
+    name: en_US.UTF-8
+    state: present
+
+- name: Set system locale to en_US.UTF-8
+  command: localectl set-locale LANG=en_US.UTF-8
+  changed_when: false
+
+
+- name: Set primary NTP server
+  lineinfile:
+    path: /etc/systemd/timesyncd.conf
+    regexp: '^#?NTP='
+    line: "NTP={{ ntp_primary }}"
+  register: ntp_primary_config
+
+- name: Set fallback NTP server
+  lineinfile:
+    path: /etc/systemd/timesyncd.conf
+    regexp: '^#?FallbackNTP='
+    line: "FallbackNTP={{ ntp_fallback }}"
+  register: ntp_fallback_config
+
+- name: Restart systemd-timesyncd
+  systemd:
+    name: systemd-timesyncd
+    state: restarted
+    enabled: yes
+  when: ntp_primary_config.changed or ntp_fallback_config.changed
+
+- name: Enable NTP synchronization
+  command: timedatectl set-ntp true
+  changed_when: false
+
+
+- name: Stop and disable unattended-upgrades service
+  systemd:
+    name: unattended-upgrades
+    state: stopped
+    enabled: no
+  ignore_errors: true
+
+- name: Kill any running apt/dpkg processes and release locks
+  shell: |
+    # Kill only exact package manager binaries (avoid killing ansible/python)
+    for proc in apt apt-get dpkg unattended-upgrade; do
+      if pgrep -x "$proc" >/dev/null 2>&1; then
+        kill -9 $(pgrep -x "$proc") 2>/dev/null || true
+        echo "Killed $proc"
+      fi
+    done
+    sleep 2
+
+    # Remove stale lock files
+    rm -f /var/lib/dpkg/lock-frontend
+    rm -f /var/lib/dpkg/lock
+    rm -f /var/lib/apt/lists/lock
+    rm -f /var/cache/apt/archives/lock
+
+    # Reconfigure any interrupted dpkg
+    dpkg --configure -a 2>/dev/null || true
+
+    echo "Package manager locks cleared."
+  changed_when: false
+
+
+- name: Add transparent_hugepage=never to GRUB cmdline (Ubuntu)
+  lineinfile:
+    path: /etc/default/grub
+    regexp: '^(GRUB_CMDLINE_LINUX="(?!.*transparent_hugepage=never)[^"]*)"'
+    line: '\1 transparent_hugepage=never"'
+    backrefs: yes
+  register: grub_thp_ubuntu
+
+- name: Update GRUB (Ubuntu)
+  command: update-grub
+  when: grub_thp_ubuntu.changed
+

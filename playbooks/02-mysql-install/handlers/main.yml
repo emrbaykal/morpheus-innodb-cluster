@@ -4,3 +4,7 @@
   service:
     name: "{{ mysql_service_name }}"
     state: restarted
+
+- name: systemd daemon-reload
+  systemd:
+    daemon_reload: yes

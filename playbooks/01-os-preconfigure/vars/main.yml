@@ -1,0 +1,22 @@
+---
+# vars file for 01-os-preconfigure
+
+sysctl_params:
+  # Network
+  - { name: net.core.somaxconn,            value: 65535 }
+  - { name: net.core.netdev_max_backlog,   value: 65535 }
+  - { name: net.ipv4.tcp_max_syn_backlog,  value: 65535 }
+  - { name: net.ipv4.tcp_fin_timeout,      value: 15 }
+  - { name: net.ipv4.tcp_tw_reuse,         value: 1 }
+  - { name: net.ipv4.ip_local_port_range,  value: "1024 65535" }
+  - { name: net.ipv4.tcp_keepalive_time,   value: 300 }
+  - { name: net.ipv4.tcp_keepalive_intvl,  value: 30 }
+  - { name: net.ipv4.tcp_keepalive_probes, value: 3 }
+  # Memory
+  - { name: vm.swappiness,               value: 10 }
+  - { name: vm.dirty_ratio,              value: 15 }
+  - { name: vm.dirty_background_ratio,   value: 5 }
+  - { name: vm.overcommit_memory,        value: 0 }
+  # File Descriptors
+  - { name: fs.file-max,                 value: 2097152 }
+  - { name: fs.aio-max-nr,              value: 1048576 }

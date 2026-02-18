@@ -1,0 +1,8 @@
+---
+# Dispatcher: include OS-specific tasks, then common tasks
+
+- name: Include OS-specific tasks
+  include_tasks: "{{ ansible_os_family | lower }}.yml"
+
+- name: Include common os-preconfigure tasks
+  include_tasks: common.yml

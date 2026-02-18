@@ -1,76 +1,4 @@
 ---
-# RedHat/CentOS/Rocky/Alma specific tasks for MySQL installation
-
-# ─── SELinux ──────────────────────────────────────────────
-
-- name: Set SELinux to permissive mode
-  selinux:
-    policy: targeted
-    state: permissive
-  ignore_errors: true
-
-# ─── Firewall ──────────────────────────────────────────────
-
-- name: Check if firewalld is installed
-  command: which firewall-cmd
-  register: firewalld_installed
-  ignore_errors: true
-  changed_when: false
-
-- name: Stop and disable firewalld
-  systemd:
-    name: firewalld
-    state: stopped
-    enabled: no
-  when: firewalld_installed.rc == 0
-  ignore_errors: true
-
-# ─── Locale ────────────────────────────────────────────────
-
-- name: Ensure en_US.UTF-8 locale is generated
-  command: localedef -i en_US -f UTF-8 en_US.UTF-8
-  changed_when: false
-  ignore_errors: true
-
-- name: Set system locale to en_US.UTF-8
-  command: localectl set-locale LANG=en_US.UTF-8
-  changed_when: false
-
-# ─── NTP Time Sync (chrony) ───────────────────────────────
-
-- name: Install chrony
-  package:
-    name: chrony
-    state: present
-
-- name: Set primary NTP server in chrony
-  lineinfile:
-    path: /etc/chrony.conf
-    regexp: '^(server|pool)\s+'
-    line: "server {{ ntp_primary }} iburst"
-    insertafter: '^#.*server'
-  register: ntp_primary_config
-
-- name: Set fallback NTP server in chrony
-  lineinfile:
-    path: /etc/chrony.conf
-    regexp: '^server\s+{{ ntp_fallback }}'
-    line: "server {{ ntp_fallback }} iburst"
-    insertafter: '^server\s+{{ ntp_primary }}'
-  register: ntp_fallback_config
-
-- name: Restart chronyd
-  systemd:
-    name: chronyd
-    state: restarted
-    enabled: yes
-  when: ntp_primary_config.changed or ntp_fallback_config.changed
-
-- name: Enable NTP synchronization
-  command: timedatectl set-ntp true
-  changed_when: false
-
-# ─── MySQL Installation ───────────────────────────────────
 
 - name: Enable CodeReady Builder repository
   command: >
@@ -127,16 +55,28 @@
   debug:
     var: held_packages.stdout_lines
 
-# ─── MySQL Native Password Plugin ─────────────────────────
 
-- name: Create MySQL native password configuration file
+- name: Ensure mysqld systemd override directory exists
+  file:
+    path: /etc/systemd/system/mysqld.service.d
+    state: directory
+    owner: root
+    group: root
+    mode: '0755'
+
+- name: Deploy mysqld systemd resource limits drop-in
   copy:
-    dest: /etc/my.cnf.d/enable-mysql-native-password.cnf
+    dest: /etc/systemd/system/mysqld.service.d/limits.conf
     content: |
-      [mysqld]
-      default_authentication_plugin=mysql_native_password
+      [Service]
+      LimitNOFILE=65535
+      LimitNPROC=65535
+      LimitMEMLOCK=infinity
+      ExecStart=
+      ExecStart=/usr/bin/numactl --interleave=all /usr/libexec/mysqld
     owner: root
     group: root
     mode: '0644'
-  notify:
-    - Restart mysql_service
+  notify: systemd daemon-reload
+
+
