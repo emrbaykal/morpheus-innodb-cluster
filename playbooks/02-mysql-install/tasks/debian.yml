@@ -6,10 +6,17 @@
     dest: /tmp/mysql-apt-config_0.8.36-1_all.deb
     mode: '0644'
 
+- name: Pre-seed mysql-apt-config to select MySQL 8.0
+  shell: |
+    echo "mysql-apt-config mysql-apt-config/select-server select mysql-8.0" | debconf-set-selections
+  changed_when: false
+
 - name: Install mysql-apt-config package
   apt:
     deb: /tmp/mysql-apt-config_0.8.36-1_all.deb
     state: present
+  environment:
+    DEBIAN_FRONTEND: noninteractive
 
 - name: Update apt cache
   apt:
