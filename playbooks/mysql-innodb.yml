@@ -29,7 +29,6 @@
        - role: 01-os-preconfigure
          tags:
            - role::os-preconfigure
-           - role::os-preconfigure::configure-issue
 
        - role: 02-mysql-install
          tags:
