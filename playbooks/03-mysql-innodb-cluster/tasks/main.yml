@@ -1,14 +1,16 @@
 ---
 
 - name: Create Cluster Admin
-  mysql_user:
+  community.mysql.mysql_user:
     name: "{{ innodb_admin_user }}"
     password: "{{ innodb_admin_password }}"
+    plugin: caching_sha2_password
     priv: '*.*:ALL,GRANT'
     host: '%'
     append_privs: yes
     login_user: root
     login_password: "{{ mysql_root_password }}"
+    login_unix_socket: "{{ mysql_socket_path }}"
     state: present
 
 - name: Delete blank users
