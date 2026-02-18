@@ -108,10 +108,17 @@
     var: mysql_service_status.stdout_lines
 
 
+- name: Check if MySQL root can connect without password (socket/empty auth)
+  command: mysql -u root -e "SELECT 1"
+  register: mysql_root_nopass
+  changed_when: false
+  ignore_errors: true
+  no_log: true
+
 - name: Set root user password (first run - socket auth)
   command: >
     mysql -u root -e
-    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+    "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
   when: mysql_root_nopass.rc == 0
   no_log: true
 
