@@ -4,6 +4,18 @@
     name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
     state: restarted
 
+- name: restart_timesyncd
+  systemd:
+    name: systemd-timesyncd
+    state: restarted
+    enabled: yes
+
+- name: restart_chronyd
+  systemd:
+    name: chronyd
+    state: restarted
+    enabled: yes
+
 - name: systemd daemon-reload
   systemd:
     daemon_reload: yes
