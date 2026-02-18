@@ -1,0 +1,14 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+
+# macOS
+.DS_Store
+
+# Runtime generated files
+cluster_config.json
+cluster_setup.log
+cluster_setup_report.txt
+playbooks/inventory.ini
+playbooks/.extra_vars.json

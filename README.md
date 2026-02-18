@@ -154,6 +154,8 @@ The script automatically installs all missing components on the local node:
 
 ## Quick Start
 
+> Run the following commands only on the server designated as the **master node** of the MySQL InnoDB Cluster.
+
 ```bash
 git clone https://github.com/emrbaykal/morpheus-innodb-cluster.git
 cd morpheus-innodb-cluster
