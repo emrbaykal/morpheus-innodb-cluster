@@ -100,22 +100,22 @@
   ignore_errors: true
   no_log: true
 
-- name: Set root user password (first run - socket auth)
-  command: >
-    mysql -u root -e
-    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
-  when: mysql_root_nopass.rc == 0
-  no_log: true
+#- name: Set root user password (first run - socket auth)
+#  command: >
+#    mysql -u root -e
+#    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+#  when: mysql_root_nopass.rc == 0
+#  no_log: true
 
-- name: Set root user password (subsequent run - existing password)
-  community.mysql.mysql_user:
-    name: root
-    password: "{{ mysql_root_password }}"
-    login_unix_socket: "{{ mysql_socket_path }}"
-    host: localhost
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-    state: present
-    update_password: always
-  when: mysql_root_nopass.rc != 0
-  no_log: true
+#- name: Set root user password (subsequent run - existing password)
+#  community.mysql.mysql_user:
+#    name: root
+#    password: "{{ mysql_root_password }}"
+#    login_unix_socket: "{{ mysql_socket_path }}"
+#    host: localhost
+#    login_user: root
+#    login_password: "{{ mysql_root_password }}"
+#    state: present
+#    update_password: always
+#  when: mysql_root_nopass.rc != 0
+#  no_log: true
