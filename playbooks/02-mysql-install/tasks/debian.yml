@@ -93,17 +93,18 @@
     var: mysql_service_status.stdout_lines
 
 
-- name: Set root user password (first run - empty password)
-  community.mysql.mysql_user:
-    name: root
-    password: "{{ mysql_root_password }}"
-    login_unix_socket: "{{ mysql_socket_path }}"
-    host: localhost
-    login_user: root
-    login_password: ''
-    state: present
-  register: root_pw_first
+- name: Check if MySQL root can connect without password (socket/empty auth)
+  command: mysql -u root -e "SELECT 1"
+  register: mysql_root_nopass
+  changed_when: false
   ignore_errors: true
+  no_log: true
+
+- name: Set root user password (first run - socket auth)
+  command: >
+    mysql -u root -e
+    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+  when: mysql_root_nopass.rc == 0
   no_log: true
 
 - name: Set root user password (subsequent run - existing password)
@@ -115,5 +116,6 @@
     login_user: root
     login_password: "{{ mysql_root_password }}"
     state: present
-  when: root_pw_first is failed
+    update_password: always
+  when: mysql_root_nopass.rc != 0
   no_log: true
