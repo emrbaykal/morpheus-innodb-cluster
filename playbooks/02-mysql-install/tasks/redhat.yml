@@ -1,10 +1,19 @@
 ---
 
-- name: Enable CodeReady Builder repository
-  command: >
-    dnf config-manager --set-enabled
-    {{ 'crb' if ansible_distribution in ['Rocky', 'AlmaLinux'] else 'codeready-builder-for-rhel-' + ansible_distribution_major_version + '-x86_64-rpms' }}
+- name: Determine CRB repository name
+  set_fact:
+    crb_repo_name: "{{ 'crb' if ansible_distribution in ['Rocky', 'AlmaLinux'] else 'codeready-builder-for-rhel-' + ansible_distribution_major_version + '-x86_64-rpms' }}"
+
+- name: Check if CRB repository is already enabled
+  shell: dnf repolist enabled 2>/dev/null | grep -q "^{{ crb_repo_name }}"
+  register: crb_status
   changed_when: false
+  failed_when: false
+
+- name: Enable CodeReady Builder repository
+  command: dnf config-manager --set-enabled {{ crb_repo_name }}
+  when: crb_status.rc != 0
+
 
 - name: Install MySQL packages (RedHat)
   package:
@@ -13,6 +22,7 @@
       - mysql
       - python3-PyMySQL
       - mysql-devel
+      - numactl
     state: present
 
 - name: Determine mysql-shell RPM URL based on EL version
@@ -25,7 +35,6 @@
     state: present
     disable_gpg_check: yes
 
-# ─── Post-Install Verification ─────────────────────────────
 
 - name: List installed MySQL packages
   shell: rpm -qa | grep -i mysql
@@ -35,6 +44,7 @@
 - name: Display installed MySQL packages
   debug:
     var: mysql_packages_installed.stdout_lines
+
 
 - name: Install yum-plugin-versionlock
   package:
@@ -54,7 +64,6 @@
 - name: Display held packages
   debug:
     var: held_packages.stdout_lines
-
 
 - name: Ensure mysqld systemd override directory exists
   file:
@@ -79,4 +88,47 @@
     mode: '0644'
   notify: systemd daemon-reload
 
+- name: Flush handlers
+  meta: flush_handlers
 
+
+- name: Ensure MySQL service is started and enabled
+  systemd:
+    name: "{{ mysql_service_name }}"
+    state: started
+    enabled: yes
+
+- name: Check MySQL service status
+  command: "systemctl status {{ mysql_service_name }}"
+  register: mysql_service_status
+  changed_when: false
+
+- name: Display MySQL service status
+  debug:
+    var: mysql_service_status.stdout_lines
+
+
+- name: Set root user password (first run - empty password)
+  community.mysql.mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    login_unix_socket: "{{ mysql_socket_path }}"
+    host: localhost
+    login_user: root
+    login_password: ''
+    state: present
+  register: root_pw_first
+  ignore_errors: true
+  no_log: true
+
+- name: Set root user password (subsequent run - existing password)
+  community.mysql.mysql_user:
+    name: root
+    password: "{{ mysql_root_password }}"
+    login_unix_socket: "{{ mysql_socket_path }}"
+    host: localhost
+    login_user: root
+    login_password: "{{ mysql_root_password }}"
+    state: present
+  when: root_pw_first is failed
+  no_log: true
