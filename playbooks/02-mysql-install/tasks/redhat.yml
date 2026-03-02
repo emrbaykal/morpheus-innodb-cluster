@@ -9,9 +9,11 @@
   register: crb_status
   changed_when: false
   failed_when: false
+  warn: false
 
 - name: Enable CodeReady Builder repository
   command: dnf config-manager --set-enabled {{ crb_repo_name }}
+  warn: false
   when: crb_status.rc != 0
 
 
@@ -56,11 +58,13 @@
     {{ 'yum' if ansible_distribution_major_version | int <= 7 else 'dnf' }}
     versionlock add mysql-server
   changed_when: false
+  warn: false
 
 - name: Verify held packages
   shell: "{{ 'yum versionlock list' if ansible_distribution_major_version | int <= 7 else 'dnf versionlock list' }}"
   register: held_packages
   changed_when: false
+  warn: false
 
 - name: Display held packages
   debug:
