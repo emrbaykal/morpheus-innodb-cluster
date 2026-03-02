@@ -54,6 +54,14 @@ REQUIRED_PACKAGES_REDHAT = [
     "python3-pip",
 ]
 
+# Subscription-manager repo names for Ansible, keyed by RHEL major version.
+# RHEL 8 uses the dedicated ansible-2.9 repo; RHEL 9 uses the
+# Ansible Automation Platform stream repo.
+RHEL_ANSIBLE_REPOS = {
+    8: "ansible-2.9-for-rhel-8-x86_64-rpms",
+    9: "ansible-automation-platform-2.4-for-rhel-9-x86_64-rpms",
+}
+
 ANSIBLE_COLLECTIONS = [
     "community.mysql",
 ]
