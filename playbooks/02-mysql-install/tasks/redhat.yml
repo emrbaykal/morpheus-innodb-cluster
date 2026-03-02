@@ -52,9 +52,10 @@
     state: present
 
 - name: Hold MySQL server package version
-  community.general.yum_versionlock:
-    name: mysql-server
-    state: present
+  shell: >
+    {{ 'yum' if ansible_distribution_major_version | int <= 7 else 'dnf' }}
+    versionlock add mysql-server
+  changed_when: false
 
 - name: Verify held packages
   shell: "{{ 'yum versionlock list' if ansible_distribution_major_version | int <= 7 else 'dnf versionlock list' }}"
