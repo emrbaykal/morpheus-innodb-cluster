@@ -213,8 +213,8 @@ def run_command(cmd, capture=False, check=True, env=None):
     try:
         if capture:
             result = subprocess.run(
-                cmd, shell=True, capture_output=True, text=True,
-                check=check, env=env
+                cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+                universal_newlines=True, check=check, env=env
             )
             return result
         else:
