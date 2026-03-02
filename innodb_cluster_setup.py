@@ -216,6 +216,27 @@ def prompt_yes_no(label, default_yes=True):
         return choice in ('y', 'yes')
 
 
+def prompt_choice(label, choices, default=None):
+    """Present a numbered list of choices and return the selected value."""
+    print_hint(f"{label}:")
+    for i, choice in enumerate(choices, 1):
+        marker = "  ← default" if choice == default else ""
+        print_hint(f"  {i}. {choice}{marker}")
+    while True:
+        raw = input(f"    {Colors.BOLD}Choice [{default}]:{Colors.END} ").strip()
+        if not raw and default:
+            return default
+        if raw in choices:
+            return raw
+        try:
+            idx = int(raw) - 1
+            if 0 <= idx < len(choices):
+                return choices[idx]
+        except ValueError:
+            pass
+        print_error(f"Please enter a number (1-{len(choices)}) or one of: {', '.join(choices)}")
+
+
 def run_command(cmd, capture=False, check=True, env=None):
     """Execute a shell command with optional streaming output."""
     try:
@@ -244,7 +265,7 @@ def run_command_stream(cmd, log_file=None, env=None):
         cmd, shell=True,
         stdout=subprocess.PIPE,
         stderr=subprocess.STDOUT,
-        text=True,
+        universal_newlines=True,
         bufsize=1,
         env=env
     )
@@ -510,7 +531,8 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
         _row("SSH Key File", config['ssh_key_file'])
     if config.get("ssh_password"):
         _row("SSH Password", "", mask=True)
-    _row("Sudo Password", config.get('become_password', ''), mask=bool(config.get('become_password')))
+    _row("Become Method", config.get('become_method', 'sudo'))
+    _row("Become Password", config.get('become_password', ''), mask=bool(config.get('become_password')))
 
     _separator()
     _section_header("MYSQL CONFIGURATION")
@@ -594,8 +616,13 @@ def collect_variables():
         config["ssh_key_file"] = ssh_key_input
 
     print()
-    if prompt_yes_no("Does the SSH user require a sudo password?", default_yes=False):
-        config["become_password"] = prompt_password("Sudo Password")
+    config["become_method"] = prompt_choice(
+        "Privilege escalation method", ["sudo", "dzdo"], default="sudo"
+    )
+    print()
+    become_label = config["become_method"].capitalize()
+    if prompt_yes_no(f"Does the SSH user require a {become_label} password?", default_yes=False):
+        config["become_password"] = prompt_password(f"{become_label} Password")
     else:
         config["become_password"] = ""
 
@@ -690,8 +717,14 @@ def get_configuration():
                         print_error("An SSH key file or password is required!")
                         sys.exit(1)
                 print()
-                if prompt_yes_no("Does the SSH user require a sudo password?", default_yes=False):
-                    config["become_password"] = prompt_password("Sudo Password")
+                config["become_method"] = prompt_choice(
+                    "Privilege escalation method", ["sudo", "dzdo"],
+                    default=config.get("become_method", "sudo")
+                )
+                print()
+                become_label = config["become_method"].capitalize()
+                if prompt_yes_no(f"Does the SSH user require a {become_label} password?", default_yes=False):
+                    config["become_password"] = prompt_password(f"{become_label} Password")
                 else:
                     config["become_password"] = ""
             elif section == '3':
@@ -752,7 +785,7 @@ def generate_inventory(config):
 
     lines.append("ansible_ssh_common_args='-o StrictHostKeyChecking=no'")
     lines.append("ansible_become=true")
-    lines.append("ansible_become_method=sudo")
+    lines.append(f"ansible_become_method={config.get('become_method', 'sudo')}")
 
     if config.get("become_password"):
         lines.append(f"ansible_become_pass={config['become_password']}")
