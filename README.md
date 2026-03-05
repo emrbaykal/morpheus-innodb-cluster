@@ -147,8 +147,32 @@ The script automatically installs all missing components on the local node:
 |-----------|--------|
 | `sshpass` | OS package manager |
 | `python3-pip` | OS package manager |
-| `ansible` | pip |
+| `ansible` | subscription-manager repo (if enabled) or pip fallback |
 | `community.mysql` | ansible-galaxy |
+
+### Required Subscription-Manager Repositories (RedHat Only)
+
+If the master node runs RHEL, the following repositories must be enabled via `subscription-manager` before running the script.
+
+**RHEL 8:**
+
+```bash
+subscription-manager repos --enable=rhel-8-for-x86_64-baseos-rpms
+subscription-manager repos --enable=rhel-8-for-x86_64-appstream-rpms
+subscription-manager repos --enable=codeready-builder-for-rhel-8-x86_64-rpms
+subscription-manager repos --enable=ansible-2.9-for-rhel-8-x86_64-rpms
+```
+
+**RHEL 9:**
+
+```bash
+subscription-manager repos --enable=rhel-9-for-x86_64-baseos-rpms
+subscription-manager repos --enable=rhel-9-for-x86_64-appstream-rpms
+subscription-manager repos --enable=codeready-builder-for-rhel-9-x86_64-rpms
+subscription-manager repos --enable=ansible-automation-platform-2.4-for-rhel-9-x86_64-rpms
+```
+
+> If the Ansible repository is not enabled, the script will warn and automatically fall back to installing Ansible via `pip3`.
 
 ---
 
