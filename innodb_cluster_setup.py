@@ -338,6 +338,38 @@ def detect_os_family():
     sys.exit(1)
 
 
+def detect_rhel_major_version():
+    """Detect the RHEL/CentOS major version number.
+
+    Returns an integer (e.g. 8 or 9), or None if it cannot be determined.
+    """
+    os_release = Path("/etc/os-release")
+    if os_release.exists():
+        for line in os_release.read_text().splitlines():
+            if line.startswith("VERSION_ID="):
+                version_str = line.split("=", 1)[1].strip().strip('"')
+                try:
+                    return int(version_str.split(".")[0])
+                except ValueError:
+                    pass
+    return None
+
+
+def check_rhel_ansible_repo_enabled(repo_name):
+    """Check whether a subscription-manager repository is currently enabled.
+
+    Returns True if enabled, False otherwise (including when
+    subscription-manager is not available).
+    """
+    if not shutil.which("subscription-manager"):
+        return False
+    result = run_command(
+        f"subscription-manager repos --list-enabled 2>/dev/null | grep -q '{repo_name}'",
+        capture=True, check=False,
+    )
+    return result.returncode == 0
+
+
 def check_root():
     """Check if running as root or with sudo."""
     if os.geteuid() != 0:
@@ -393,7 +425,8 @@ def setup_environment():
                 print_error(f"Failed to install '{pkg}': {result.stderr}")
                 sys.exit(1)
 
-    # On RedHat, install Ansible via pip (no EPEL needed)
+    # On RedHat, install Ansible via subscription-manager repo (if enabled)
+    # or fall back to pip when the repo is not active.
     if os_family == "redhat":
         pkg = "ansible"
         sys.stdout.write(f"  {Colors.CYAN}Checking '{pkg}'...{Colors.END}")
@@ -403,14 +436,53 @@ def setup_environment():
             print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
         else:
             print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
-            result = run_command(
-                "pip3 install ansible", capture=True, check=False
-            )
-            if result.returncode == 0:
-                print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
+
+            # Determine the expected subscription-manager repo for this RHEL version.
+            rhel_ver = detect_rhel_major_version()
+            ansible_repo = RHEL_ANSIBLE_REPOS.get(rhel_ver)
+
+            ansible_installed = False
+
+            if ansible_repo:
+                print_info(f"Detected RHEL {rhel_ver}. Expected Ansible repo: {ansible_repo}")
+                if check_rhel_ansible_repo_enabled(ansible_repo):
+                    # Repo is enabled – install via dnf/yum.
+                    pkg_mgr_install = (
+                        f"dnf install -y -q ansible" if shutil.which("dnf")
+                        else "yum install -y -q ansible"
+                    )
+                    result = run_command(pkg_mgr_install, capture=True, check=False)
+                    if result.returncode == 0:
+                        print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
+                        ansible_installed = True
+                    else:
+                        print_warning(
+                            f"dnf/yum install of ansible failed even though repo '{ansible_repo}' "
+                            "appears enabled. Falling back to pip..."
+                        )
+                else:
+                    print_warning(
+                        f"Ansible repository '{ansible_repo}' is NOT enabled in "
+                        "subscription-manager. Falling back to pip installation..."
+                    )
+                    print_hint(
+                        f"To enable it manually run:\n"
+                        f"    subscription-manager repos --enable={ansible_repo}"
+                    )
             else:
-                print_error(f"Failed to install '{pkg}': {result.stderr}")
-                sys.exit(1)
+                print_warning(
+                    f"No known Ansible subscription-manager repo for RHEL {rhel_ver}. "
+                    "Falling back to pip installation..."
+                )
+
+            if not ansible_installed:
+                # Fallback: install ansible via pip3.
+                result = run_command("pip3 install ansible", capture=True, check=False)
+                if result.returncode == 0:
+                    print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed (pip)':>15}")
+                else:
+                    print_error(f"Failed to install '{pkg}' via pip3: {result.stderr}")
+                    sys.exit(1)
 
     # Install Ansible collections
     for collection in ANSIBLE_COLLECTIONS:

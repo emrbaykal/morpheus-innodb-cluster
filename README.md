@@ -132,7 +132,7 @@ Playbooks automatically detect `ansible_os_family` and execute the appropriate t
 ## Prerequisites
 
 **On the node where you run the script:**
-- Python 3.6+
+- Python 3.6+ (`python3` package must be installed)
 - `sudo` access
 
 **On all 3 target cluster nodes:**
