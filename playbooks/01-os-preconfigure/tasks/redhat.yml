@@ -146,10 +146,10 @@
   register: efi_check
   when: grub_thp_rhel.changed
 
-- name: Update GRUB - BIOS 
-  command: grub2-mkconfig -o /boot/grub2/grub.cfg
+- name: Update GRUB - BIOS
+  command: /sbin/grub2-mkconfig -o /boot/grub2/grub.cfg
   when: grub_thp_rhel.changed and not efi_check.stat.exists
 
-- name: Update GRUB - UEFI 
-  command: grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
+- name: Update GRUB - UEFI
+  command: /sbin/grub2-mkconfig -o /boot/efi/EFI/redhat/grub.cfg
   when: grub_thp_rhel.changed and efi_check.stat.exists
