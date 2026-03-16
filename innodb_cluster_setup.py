@@ -1050,19 +1050,28 @@ def check_mysql_packages_on_nodes(config):
     roles = ["Master", "Slave 1", "Slave 2"]
 
     # Shell command: try rpm first (RHEL/CentOS), fall back to dpkg (Debian/Ubuntu)
+    def _pkg_cmd(name, community_name):
+        # rpm prints "package X is not installed" to stdout on failure even with
+        # --queryformat, so we silence it entirely and only query the version
+        # when the package is confirmed present (exit 0).
+        return (
+            f'V=""; '
+            f'if rpm -q {name} >/dev/null 2>&1; then '
+            f'  V=$(rpm -q --queryformat "%{{VERSION}}-%{{RELEASE}}" {name} 2>/dev/null); '
+            f'fi; '
+            f'if [ -z "$V" ] && rpm -q {community_name} >/dev/null 2>&1; then '
+            f'  V=$(rpm -q --queryformat "%{{VERSION}}-%{{RELEASE}}" {community_name} 2>/dev/null); '
+            f'fi; '
+            f'if [ -z "$V" ]; then '
+            f'  V=$(dpkg-query -W -f="${{Version}}" {name} 2>/dev/null); '
+            f'fi; '
+            f'[ -z "$V" ] && V=NOT_INSTALLED; '
+            f'echo "$V"'
+        )
+
     pkg_cmds = {
-        "mysql-server": (
-            "rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-server 2>/dev/null"
-            " || rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-community-server 2>/dev/null"
-            " || dpkg-query -W -f='${Version}' mysql-server 2>/dev/null"
-            " || echo NOT_INSTALLED"
-        ),
-        "mysql-shell": (
-            "rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-shell 2>/dev/null"
-            " || rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-community-shell 2>/dev/null"
-            " || dpkg-query -W -f='${Version}' mysql-shell 2>/dev/null"
-            " || echo NOT_INSTALLED"
-        ),
+        "mysql-server": _pkg_cmd("mysql-server", "mysql-community-server"),
+        "mysql-shell":  _pkg_cmd("mysql-shell",  "mysql-community-shell"),
     }
 
     pre_check_results = {}
