@@ -257,6 +257,21 @@ def run_command(cmd, capture=False, check=True, env=None):
         raise
 
 
+def run_ansible_shell(ip, inventory_file, shell_cmd):
+    """Run ansible shell module without going through a local shell.
+
+    Uses subprocess.run with shell=False so that special characters
+    in shell_cmd (quotes, dollar signs, etc.) are passed verbatim to
+    ansible without being interpreted by the local shell first.
+    """
+    result = subprocess.run(
+        ["ansible", str(ip), "-i", str(inventory_file), "-m", "shell", "-a", shell_cmd],
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        universal_newlines=True,
+    )
+    return result
+
+
 def run_command_stream(cmd, log_file=None, env=None):
     """Execute a command and stream output in real-time while capturing it."""
     output_lines = []
@@ -930,27 +945,28 @@ def check_rhel_repos_on_nodes(config):
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
 
-    # Single shell command: detect OS, then check repos if RHEL
+    # Single shell command: detect OS, then check repos if RHEL.
+    # Passed via run_ansible_shell (shell=False) so no local-shell quoting needed.
     shell_cmd = (
         ". /etc/os-release 2>/dev/null; "
-        "OS_ID=\"${ID:-}\"; "
-        "VER=\"${VERSION_ID%%.*}\"; "
-        "if [ \"$OS_ID\" != \"rhel\" ]; then "
-        "  echo \"NOT_RHEL:${OS_ID}:${VER}\"; exit 0; "
+        'OS_ID="${ID:-}"; '
+        'VER="${VERSION_ID%%.*}"; '
+        'if [ "$OS_ID" != "rhel" ]; then '
+        '  echo "NOT_RHEL:${OS_ID}:${VER}"; exit 0; '
         "fi; "
-        "echo \"RHEL:${VER}\"; "
-        "if [ \"$VER\" = \"8\" ]; then "
-        "  REPOS=\"rhel-8-for-x86_64-baseos-rpms rhel-8-for-x86_64-appstream-rpms\"; "
-        "elif [ \"$VER\" = \"9\" ]; then "
-        "  REPOS=\"rhel-9-for-x86_64-baseos-rpms rhel-9-for-x86_64-appstream-rpms\"; "
+        'echo "RHEL:${VER}"; '
+        'if [ "$VER" = "8" ]; then '
+        '  REPOS="rhel-8-for-x86_64-baseos-rpms rhel-8-for-x86_64-appstream-rpms"; '
+        'elif [ "$VER" = "9" ]; then '
+        '  REPOS="rhel-9-for-x86_64-baseos-rpms rhel-9-for-x86_64-appstream-rpms"; '
         "else "
-        "  echo \"UNKNOWN_VER:${VER}\"; exit 0; "
+        '  echo "UNKNOWN_VER:${VER}"; exit 0; '
         "fi; "
         "for repo in $REPOS; do "
-        "  if subscription-manager repos --list-enabled 2>/dev/null | grep -q \"$repo\"; then "
-        "    echo \"REPO_ENABLED:${repo}\"; "
+        '  if subscription-manager repos --list-enabled 2>/dev/null | grep -q "$repo"; then '
+        '    echo "REPO_ENABLED:${repo}"; '
         "  else "
-        "    echo \"REPO_DISABLED:${repo}\"; "
+        '    echo "REPO_DISABLED:${repo}"; '
         "  fi; "
         "done"
     )
@@ -965,10 +981,7 @@ def check_rhel_repos_on_nodes(config):
 
         print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
 
-        result = run_command(
-            f"ansible {ip} -i {INVENTORY_FILE} -m shell -a \"{shell_cmd}\"",
-            capture=True, check=False,
-        )
+        result = run_ansible_shell(ip, INVENTORY_FILE, shell_cmd)
 
         if result.returncode != 0:
             print(f"    {Colors.DIM}  Repository check failed (ansible error){Colors.END}")
@@ -1066,10 +1079,7 @@ def check_mysql_packages_on_nodes(config):
         print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
 
         for pkg_name, shell_cmd in pkg_cmds.items():
-            result = run_command(
-                f"ansible {ip} -i {INVENTORY_FILE} -m shell -a \"{shell_cmd}\"",
-                capture=True, check=False,
-            )
+            result = run_ansible_shell(ip, INVENTORY_FILE, shell_cmd)
 
             version = "N/A"
             if result.returncode == 0:
