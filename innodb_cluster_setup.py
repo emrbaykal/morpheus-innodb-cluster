@@ -66,7 +66,7 @@ ANSIBLE_COLLECTIONS = [
     "community.mysql",
 ]
 
-TOTAL_STEPS = 8
+TOTAL_STEPS = 9
 
 
 # ─── Colors & Formatting ────────────────────────────────────────────────────
@@ -592,7 +592,7 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
     print(f"  {Colors.BOLD}┌{'─' * COL1}┬{'─' * COL2}┐{Colors.END}")
     _section_header("CLUSTER NODES")
     _separator()
-    for i, (label, node) in enumerate([("Master Node", nodes[0]), ("Slave Node 1", nodes[1]), ("Slave Node 2", nodes[2])]):
+    for label, node in [("Master Node", nodes[0]), ("Slave Node 1", nodes[1]), ("Slave Node 2", nodes[2])]:
         _row(label, f"{node['hostname']} ({node['ip']})")
 
     _separator()
@@ -922,9 +922,118 @@ def test_connectivity(config):
         print_success("All nodes are reachable!")
 
 
+def check_rhel_repos_on_nodes(config):
+    """Check required RHEL subscription-manager repositories on all cluster nodes."""
+    print_step(5, "RHEL REPOSITORY CHECK")
+    print_info("Checking RHEL subscription-manager repository status on all nodes...\n")
+
+    nodes = config["nodes"]
+    roles = ["Master", "Slave 1", "Slave 2"]
+
+    # Single shell command: detect OS, then check repos if RHEL
+    shell_cmd = (
+        ". /etc/os-release 2>/dev/null; "
+        "OS_ID=\"${ID:-}\"; "
+        "VER=\"${VERSION_ID%%.*}\"; "
+        "if [ \"$OS_ID\" != \"rhel\" ]; then "
+        "  echo \"NOT_RHEL:${OS_ID}:${VER}\"; exit 0; "
+        "fi; "
+        "echo \"RHEL:${VER}\"; "
+        "if [ \"$VER\" = \"8\" ]; then "
+        "  REPOS=\"rhel-8-for-x86_64-baseos-rpms rhel-8-for-x86_64-appstream-rpms\"; "
+        "elif [ \"$VER\" = \"9\" ]; then "
+        "  REPOS=\"rhel-9-for-x86_64-baseos-rpms rhel-9-for-x86_64-appstream-rpms\"; "
+        "else "
+        "  echo \"UNKNOWN_VER:${VER}\"; exit 0; "
+        "fi; "
+        "for repo in $REPOS; do "
+        "  if subscription-manager repos --list-enabled 2>/dev/null | grep -q \"$repo\"; then "
+        "    echo \"REPO_ENABLED:${repo}\"; "
+        "  else "
+        "    echo \"REPO_DISABLED:${repo}\"; "
+        "  fi; "
+        "done"
+    )
+
+    repo_check_results = {}
+    any_repo_disabled = False
+
+    for i, node in enumerate(nodes):
+        ip = node["ip"]
+        label = f"{node['hostname']} ({ip})"
+        repo_check_results[ip] = {"os": None, "rhel_version": None, "repos": {}}
+
+        print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
+
+        result = run_command(
+            f"ansible {ip} -i {INVENTORY_FILE} -m shell -a \"{shell_cmd}\"",
+            capture=True, check=False,
+        )
+
+        if result.returncode != 0:
+            print(f"    {Colors.DIM}  Repository check failed (ansible error){Colors.END}")
+            print()
+            continue
+
+        # Parse ansible output — actual stdout starts after the ">>" header line
+        output_lines = []
+        past_header = False
+        for line in (result.stdout or "").strip().split('\n'):
+            if past_header and line.strip():
+                output_lines.append(line.strip())
+            if ">>" in line:
+                past_header = True
+
+        if not output_lines:
+            print(f"    {Colors.DIM}  No output received{Colors.END}")
+            print()
+            continue
+
+        first_line = output_lines[0]
+        if first_line.startswith("NOT_RHEL:"):
+            parts = first_line.split(":")
+            os_id = parts[1] if len(parts) > 1 else "unknown"
+            os_ver = parts[2] if len(parts) > 2 else "?"
+            repo_check_results[ip]["os"] = os_id
+            print(f"    {Colors.DIM}  Not RHEL ({os_id} {os_ver}) — repository check skipped{Colors.END}")
+
+        elif first_line.startswith("RHEL:"):
+            rhel_ver = first_line.split(":", 1)[1]
+            repo_check_results[ip]["os"] = "rhel"
+            repo_check_results[ip]["rhel_version"] = rhel_ver
+            print(f"    {Colors.CYAN}  RHEL {rhel_ver} detected{Colors.END}")
+
+            for line in output_lines[1:]:
+                if line.startswith("REPO_ENABLED:"):
+                    repo = line.split(":", 1)[1]
+                    repo_check_results[ip]["repos"][repo] = True
+                    print(f"    {Colors.GREEN}✓  {repo}{Colors.END}")
+                elif line.startswith("REPO_DISABLED:"):
+                    repo = line.split(":", 1)[1]
+                    repo_check_results[ip]["repos"][repo] = False
+                    any_repo_disabled = True
+                    print(f"    {Colors.RED}✗  {repo}  (NOT ENABLED){Colors.END}")
+                elif line.startswith("UNKNOWN_VER:"):
+                    ver = line.split(":", 1)[1]
+                    print(f"    {Colors.YELLOW}⚠  RHEL {ver} — no predefined repo list for this version{Colors.END}")
+        else:
+            print(f"    {Colors.DIM}  Unexpected output: {first_line}{Colors.END}")
+
+        print()
+
+    if any_repo_disabled:
+        print_warning("One or more required RHEL repositories are NOT enabled!")
+        print_warning("Enable missing repos with:")
+        print_hint("  subscription-manager repos --enable=<repo-name>")
+    else:
+        print_success("RHEL repository check passed (or nodes are not RHEL).")
+
+    return repo_check_results
+
+
 def check_mysql_packages_on_nodes(config):
     """Check for pre-existing MySQL packages on all cluster nodes via Ansible ad-hoc."""
-    print_step(5, "PRE-FLIGHT MYSQL PACKAGE CHECK")
+    print_step(6, "PRE-FLIGHT MYSQL PACKAGE CHECK")
     print_info("Checking for pre-existing MySQL installations on all nodes...\n")
 
     nodes = config["nodes"]
@@ -1024,7 +1133,7 @@ def build_extra_vars(config):
 
 def run_playbook(config):
     """Run the Ansible playbook with real-time output."""
-    print_step(7, "RUNNING ANSIBLE PLAYBOOK")
+    print_step(8, "RUNNING ANSIBLE PLAYBOOK")
 
     extra_vars = build_extra_vars(config)
 
@@ -1106,9 +1215,9 @@ def parse_ansible_recap(output_lines):
     return recap
 
 
-def generate_report(config, returncode, output_lines, elapsed, pre_check_results=None):
+def generate_report(config, returncode, output_lines, elapsed, pre_check_results=None, repo_check_results=None):
     """Generate a detailed setup report."""
-    print_step(8, "SETUP REPORT")
+    print_step(9, "SETUP REPORT")
 
     recap = parse_ansible_recap(output_lines)
     nodes = config["nodes"]
@@ -1125,6 +1234,36 @@ def generate_report(config, returncode, output_lines, elapsed, pre_check_results
     report_lines.append(f"  Total Duration     : {format_duration(elapsed)}")
     report_lines.append(f"  Overall Status     : {overall_status}")
     report_lines.append(f"  Ansible Exit Code  : {returncode}")
+    report_lines.append("")
+    report_lines.append("-" * 70)
+    report_lines.append("  RHEL REPOSITORY STATUS (Before Ansible)")
+    report_lines.append("-" * 70)
+
+    if repo_check_results:
+        for node in nodes:
+            ip = node["ip"]
+            label = f"{node['hostname']} ({ip})"
+            node_data = repo_check_results.get(ip, {})
+            os_id = node_data.get("os")
+            rhel_ver = node_data.get("rhel_version")
+            repos = node_data.get("repos", {})
+
+            if os_id is None:
+                report_lines.append(f"  {label}: check failed")
+            elif os_id != "rhel":
+                report_lines.append(f"  {label}: Not RHEL ({os_id}) — skipped")
+            else:
+                report_lines.append(f"  {label}: RHEL {rhel_ver}")
+                if repos:
+                    for repo, enabled in repos.items():
+                        status = "ENABLED " if enabled else "DISABLED"
+                        icon = "✓" if enabled else "✗"
+                        report_lines.append(f"    {icon} [{status}] {repo}")
+                else:
+                    report_lines.append(f"    No repo data (unsupported RHEL version or subscription-manager unavailable)")
+    else:
+        report_lines.append("  RHEL repository check was not performed.")
+
     report_lines.append("")
     report_lines.append("-" * 70)
     report_lines.append("  PRE-EXISTING MYSQL PACKAGES (Before Ansible)")
@@ -1262,11 +1401,14 @@ def main():
     # Step 4: Test connectivity
     test_connectivity(config)
 
-    # Step 5: Pre-flight MySQL package check
+    # Step 5: RHEL repository check
+    repo_check_results = check_rhel_repos_on_nodes(config)
+
+    # Step 6: Pre-existing MySQL package check
     pre_check_results = check_mysql_packages_on_nodes(config)
 
-    # Step 6: Deployment confirmation
-    print_step(6, "DEPLOYMENT CONFIRMATION")
+    # Step 7: Deployment confirmation
+    print_step(7, "DEPLOYMENT CONFIRMATION")
 
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
@@ -1291,7 +1433,7 @@ def main():
     returncode, output_lines, elapsed = run_playbook(config)
 
     # Step 7: Generate report
-    status = generate_report(config, returncode, output_lines, elapsed, pre_check_results)
+    status = generate_report(config, returncode, output_lines, elapsed, pre_check_results, repo_check_results)
 
     # Final message
     print()
