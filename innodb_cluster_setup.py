@@ -450,7 +450,8 @@ def setup_environment():
         if check.returncode == 0:
             print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
         else:
-            print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
+            # Clear the "Checking..." line before printing multi-line status messages
+            print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'not installed':>13}")
 
             # Determine the expected subscription-manager repo for this RHEL version.
             rhel_ver = detect_rhel_major_version()
@@ -462,13 +463,14 @@ def setup_environment():
                 print_info(f"Detected RHEL {rhel_ver}. Expected Ansible repo: {ansible_repo}")
                 if check_rhel_ansible_repo_enabled(ansible_repo):
                     # Repo is enabled – install via dnf/yum.
+                    print_info(f"Installing ansible via dnf/yum...")
                     pkg_mgr_install = (
                         f"dnf install -y -q ansible" if shutil.which("dnf")
                         else "yum install -y -q ansible"
                     )
                     result = run_command(pkg_mgr_install, capture=True, check=False)
                     if result.returncode == 0:
-                        print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
+                        print_success(f"{pkg:<30} {'installed':>12}")
                         ansible_installed = True
                     else:
                         print_warning(
@@ -492,9 +494,10 @@ def setup_environment():
 
             if not ansible_installed:
                 # Fallback: install ansible via pip3.
+                print_info("Installing ansible via pip3...")
                 result = run_command("pip3 install ansible", capture=True, check=False)
                 if result.returncode == 0:
-                    print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed (pip)':>15}")
+                    print_success(f"{pkg:<30} {'installed (pip)':>15}")
                 else:
                     print_error(f"Failed to install '{pkg}' via pip3: {result.stderr}")
                     sys.exit(1)
