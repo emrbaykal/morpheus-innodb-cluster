@@ -923,7 +923,7 @@ def test_connectivity(config):
 
 
 def check_mysql_packages_on_nodes(config):
-    """Check for pre-existing MySQLs packages on all cluster nodes via Ansible ad-hoc."""
+    """Check for pre-existing MySQL packages on all cluster nodes via Ansible ad-hoc."""
     print_step(5, "PRE-FLIGHT MYSQL PACKAGE CHECK")
     print_info("Checking for pre-existing MySQL installations on all nodes...\n")
 
