@@ -938,23 +938,42 @@ def test_connectivity(config):
 
 
 def check_rhel_repos_on_nodes(config):
-    """Check required RHEL subscription-manager repositories on all cluster nodes."""
-    print_step(5, "RHEL REPOSITORY CHECK")
-    print_info("Checking RHEL subscription-manager repository status on all nodes...\n")
+    """Check required RHEL subscription-manager repositories on all cluster nodes.
 
+    Runs a quick OS detection first. If none of the nodes are RHEL, the step
+    is skipped entirely — no output is shown for non-RHEL environments.
+    """
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
 
-    # Single shell command: detect OS, then check repos if RHEL.
-    # Passed via run_ansible_shell (shell=False) so no local-shell quoting needed.
-    shell_cmd = (
-        ". /etc/os-release 2>/dev/null; "
-        'OS_ID="${ID:-}"; '
+    # ── OS detection: check master node only (all nodes share the same OS) ────
+    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID:-unknown}:${VERSION_ID%%.*}"'
+    master_ip = nodes[0]["ip"]
+    result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
+
+    os_id, rhel_ver = "unknown", "?"
+    if result.returncode == 0:
+        past_header = False
+        for line in (result.stdout or "").strip().split('\n'):
+            if past_header and line.strip():
+                parts = line.strip().split(":", 1)
+                os_id = parts[0] if parts else "unknown"
+                rhel_ver = parts[1] if len(parts) > 1 else "?"
+                break
+            if ">>" in line:
+                past_header = True
+
+    # Not RHEL — skip the step entirely
+    if os_id != "rhel":
+        return {}
+
+    # ── RHEL confirmed: run repo check on all nodes ───────────────────────────
+    print_step(5, "RHEL REPOSITORY CHECK")
+    print_info(f"RHEL {rhel_ver} detected. Checking subscription-manager repositories...\n")
+
+    repo_cmd = (
+        '. /etc/os-release 2>/dev/null; '
         'VER="${VERSION_ID%%.*}"; '
-        'if [ "$OS_ID" != "rhel" ]; then '
-        '  echo "NOT_RHEL:${OS_ID}:${VER}"; exit 0; '
-        "fi; "
-        'echo "RHEL:${VER}"; '
         'if [ "$VER" = "8" ]; then '
         '  REPOS="rhel-8-for-x86_64-baseos-rpms rhel-8-for-x86_64-appstream-rpms"; '
         'elif [ "$VER" = "9" ]; then '
@@ -977,18 +996,17 @@ def check_rhel_repos_on_nodes(config):
     for i, node in enumerate(nodes):
         ip = node["ip"]
         label = f"{node['hostname']} ({ip})"
-        repo_check_results[ip] = {"os": None, "rhel_version": None, "repos": {}}
+        repo_check_results[ip] = {"os": "rhel", "rhel_version": rhel_ver, "repos": {}}
 
         print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
 
-        result = run_ansible_shell(ip, INVENTORY_FILE, shell_cmd)
+        result = run_ansible_shell(ip, INVENTORY_FILE, repo_cmd)
 
         if result.returncode != 0:
             print(f"    {Colors.DIM}  Repository check failed (ansible error){Colors.END}")
             print()
             continue
 
-        # Parse ansible output — actual stdout starts after the ">>" header line
         output_lines = []
         past_header = False
         for line in (result.stdout or "").strip().split('\n'):
@@ -997,40 +1015,19 @@ def check_rhel_repos_on_nodes(config):
             if ">>" in line:
                 past_header = True
 
-        if not output_lines:
-            print(f"    {Colors.DIM}  No output received{Colors.END}")
-            print()
-            continue
-
-        first_line = output_lines[0]
-        if first_line.startswith("NOT_RHEL:"):
-            parts = first_line.split(":")
-            os_id = parts[1] if len(parts) > 1 else "unknown"
-            os_ver = parts[2] if len(parts) > 2 else "?"
-            repo_check_results[ip]["os"] = os_id
-            print(f"    {Colors.DIM}  Not RHEL ({os_id} {os_ver}) — repository check skipped{Colors.END}")
-
-        elif first_line.startswith("RHEL:"):
-            rhel_ver = first_line.split(":", 1)[1]
-            repo_check_results[ip]["os"] = "rhel"
-            repo_check_results[ip]["rhel_version"] = rhel_ver
-            print(f"    {Colors.CYAN}  RHEL {rhel_ver} detected{Colors.END}")
-
-            for line in output_lines[1:]:
-                if line.startswith("REPO_ENABLED:"):
-                    repo = line.split(":", 1)[1]
-                    repo_check_results[ip]["repos"][repo] = True
-                    print(f"    {Colors.GREEN}✓  {repo}{Colors.END}")
-                elif line.startswith("REPO_DISABLED:"):
-                    repo = line.split(":", 1)[1]
-                    repo_check_results[ip]["repos"][repo] = False
-                    any_repo_disabled = True
-                    print(f"    {Colors.RED}✗  {repo}  (NOT ENABLED){Colors.END}")
-                elif line.startswith("UNKNOWN_VER:"):
-                    ver = line.split(":", 1)[1]
-                    print(f"    {Colors.YELLOW}⚠  RHEL {ver} — no predefined repo list for this version{Colors.END}")
-        else:
-            print(f"    {Colors.DIM}  Unexpected output: {first_line}{Colors.END}")
+        for line in output_lines:
+            if line.startswith("REPO_ENABLED:"):
+                repo = line.split(":", 1)[1]
+                repo_check_results[ip]["repos"][repo] = True
+                print(f"    {Colors.GREEN}✓  {repo}{Colors.END}")
+            elif line.startswith("REPO_DISABLED:"):
+                repo = line.split(":", 1)[1]
+                repo_check_results[ip]["repos"][repo] = False
+                any_repo_disabled = True
+                print(f"    {Colors.RED}✗  {repo}  (NOT ENABLED){Colors.END}")
+            elif line.startswith("UNKNOWN_VER:"):
+                ver = line.split(":", 1)[1]
+                print(f"    {Colors.YELLOW}⚠  RHEL {ver} — no predefined repo list for this version{Colors.END}")
 
         print()
 
@@ -1039,7 +1036,7 @@ def check_rhel_repos_on_nodes(config):
         print_warning("Enable missing repos with:")
         print_hint("  subscription-manager repos --enable=<repo-name>")
     else:
-        print_success("RHEL repository check passed (or nodes are not RHEL).")
+        print_success("All required RHEL repositories are enabled.")
 
     return repo_check_results
 
