@@ -66,7 +66,7 @@ ANSIBLE_COLLECTIONS = [
     "community.mysql",
 ]
 
-TOTAL_STEPS = 7
+TOTAL_STEPS = 8
 
 
 # ─── Colors & Formatting ────────────────────────────────────────────────────
@@ -922,6 +922,79 @@ def test_connectivity(config):
         print_success("All nodes are reachable!")
 
 
+def check_mysql_packages_on_nodes(config):
+    """Check for pre-existing MySQL packages on all cluster nodes via Ansible ad-hoc."""
+    print_step(5, "PRE-FLIGHT MYSQL PACKAGE CHECK")
+    print_info("Checking for pre-existing MySQL installations on all nodes...\n")
+
+    nodes = config["nodes"]
+    roles = ["Master", "Slave 1", "Slave 2"]
+
+    # Shell command: try rpm first (RHEL/CentOS), fall back to dpkg (Debian/Ubuntu)
+    pkg_cmds = {
+        "mysql-server": (
+            "rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-server 2>/dev/null"
+            " || rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-community-server 2>/dev/null"
+            " || dpkg-query -W -f='${Version}' mysql-server 2>/dev/null"
+            " || echo NOT_INSTALLED"
+        ),
+        "mysql-shell": (
+            "rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-shell 2>/dev/null"
+            " || rpm -q --queryformat '%{VERSION}-%{RELEASE}' mysql-community-shell 2>/dev/null"
+            " || dpkg-query -W -f='${Version}' mysql-shell 2>/dev/null"
+            " || echo NOT_INSTALLED"
+        ),
+    }
+
+    pre_check_results = {}
+    any_mysql_found = False
+
+    for i, node in enumerate(nodes):
+        ip = node["ip"]
+        label = f"{node['hostname']} ({ip})"
+        pre_check_results[ip] = {}
+
+        print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
+
+        for pkg_name, shell_cmd in pkg_cmds.items():
+            result = run_command(
+                f"ansible {ip} -i {INVENTORY_FILE} -m shell -a \"{shell_cmd}\"",
+                capture=True, check=False,
+            )
+
+            version = "N/A"
+            if result.returncode == 0:
+                # Ansible output format:
+                #   ip | CHANGED | rc=0 >>
+                #   <actual stdout>
+                output = result.stdout or ""
+                past_header = False
+                for line in output.strip().split('\n'):
+                    if past_header and line.strip():
+                        version = line.strip()
+                        break
+                    if ">>" in line:
+                        past_header = True
+
+            if version and version not in ("NOT_INSTALLED", "N/A", ""):
+                pre_check_results[ip][pkg_name] = version
+                any_mysql_found = True
+                print(f"    {Colors.YELLOW}⚠  {pkg_name:<25} {version}{Colors.END}")
+            else:
+                pre_check_results[ip][pkg_name] = "N/A"
+                print(f"    {Colors.GREEN}✓  {pkg_name:<25} not installed{Colors.END}")
+
+        print()
+
+    if any_mysql_found:
+        print_warning("Pre-existing MySQL packages detected on one or more nodes!")
+        print_warning("Review the versions above before proceeding with the playbooks.")
+    else:
+        print_success("No pre-existing MySQL installations found on any node.")
+
+    return pre_check_results
+
+
 def build_extra_vars(config):
     """Build the extra-vars JSON for ansible-playbook.
 
@@ -951,7 +1024,7 @@ def build_extra_vars(config):
 
 def run_playbook(config):
     """Run the Ansible playbook with real-time output."""
-    print_step(6, "RUNNING ANSIBLE PLAYBOOK")
+    print_step(7, "RUNNING ANSIBLE PLAYBOOK")
 
     extra_vars = build_extra_vars(config)
 
@@ -1033,9 +1106,9 @@ def parse_ansible_recap(output_lines):
     return recap
 
 
-def generate_report(config, returncode, output_lines, elapsed):
+def generate_report(config, returncode, output_lines, elapsed, pre_check_results=None):
     """Generate a detailed setup report."""
-    print_step(7, "SETUP REPORT")
+    print_step(8, "SETUP REPORT")
 
     recap = parse_ansible_recap(output_lines)
     nodes = config["nodes"]
@@ -1052,6 +1125,24 @@ def generate_report(config, returncode, output_lines, elapsed):
     report_lines.append(f"  Total Duration     : {format_duration(elapsed)}")
     report_lines.append(f"  Overall Status     : {overall_status}")
     report_lines.append(f"  Ansible Exit Code  : {returncode}")
+    report_lines.append("")
+    report_lines.append("-" * 70)
+    report_lines.append("  PRE-EXISTING MYSQL PACKAGES (Before Ansible)")
+    report_lines.append("-" * 70)
+
+    if pre_check_results:
+        report_lines.append(f"  {'Node':<35} {'mysql-server':<25} {'mysql-shell':<25}")
+        report_lines.append(f"  {'─' * 35} {'─' * 25} {'─' * 25}")
+        for node in nodes:
+            ip = node["ip"]
+            label = f"{node['hostname']} ({ip})"
+            pkgs = pre_check_results.get(ip, {})
+            server_ver = pkgs.get("mysql-server", "N/A")
+            shell_ver = pkgs.get("mysql-shell", "N/A")
+            report_lines.append(f"  {label:<35} {server_ver:<25} {shell_ver:<25}")
+    else:
+        report_lines.append("  Pre-existing package check was not performed.")
+
     report_lines.append("")
     report_lines.append("-" * 70)
     report_lines.append("  CLUSTER DETAILS")
@@ -1171,8 +1262,11 @@ def main():
     # Step 4: Test connectivity
     test_connectivity(config)
 
-    # Step 5: Deployment confirmation
-    print_step(5, "DEPLOYMENT CONFIRMATION")
+    # Step 5: Pre-flight MySQL package check
+    pre_check_results = check_mysql_packages_on_nodes(config)
+
+    # Step 6: Deployment confirmation
+    print_step(6, "DEPLOYMENT CONFIRMATION")
 
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
@@ -1197,7 +1291,7 @@ def main():
     returncode, output_lines, elapsed = run_playbook(config)
 
     # Step 7: Generate report
-    status = generate_report(config, returncode, output_lines, elapsed)
+    status = generate_report(config, returncode, output_lines, elapsed, pre_check_results)
 
     # Final message
     print()
