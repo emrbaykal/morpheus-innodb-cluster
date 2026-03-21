@@ -1261,14 +1261,13 @@ def select_mysql_version_debian(config):
 
 
 def select_mysql_version_redhat(config):
-    """If the cluster nodes run a RedHat-family OS, list all available
-    mysql-server versions from the current repositories using:
-        dnf list --showduplicates mysql-server
-    and ask the user which version to install.
+    """If the cluster nodes run a RedHat-family OS:
+      1. Ask which AppStream stream to use (8.0 or 8.4, default 8.0).
+      2. If stream changed, run: dnf module disable mysql + dnf module enable mysql:<stream>
+      3. Query available mysql-server versions from that stream.
+      4. Ask the user to select a specific version.
 
-    The AppStream stream is derived automatically from the selected version
-    (e.g. 8.4.3 → stream 8.4).  Both values are saved to cluster_config.json
-    and passed to Ansible as extra-vars.
+    Both mysql_version (stream) and mysql_version_full are saved to config.
     Returns config (possibly updated).
     """
     master_ip = config["nodes"][0]["ip"]
@@ -1283,7 +1282,6 @@ def select_mysql_version_redhat(config):
         return config
 
     print_step(8, "MYSQL VERSION SELECTION")
-    print_info("RedHat-family OS detected. Querying available mysql-server versions...\n")
 
     # If already fully configured, confirm and skip
     if config.get("mysql_version") and config.get("mysql_version_full"):
@@ -1294,7 +1292,37 @@ def select_mysql_version_redhat(config):
         if prompt_yes_no("Keep this version?", default_yes=True):
             return config
 
-    # List all available mysql-server versions from current repos
+    # ── Step 1: Stream selection ──────────────────────────────────────────────
+    available_streams = ["8.0", "8.4"]
+    default_stream = config.get("mysql_version", "8.0")
+    if default_stream not in available_streams:
+        default_stream = "8.0"
+
+    print_info("RedHat-family OS detected. First, select the MySQL AppStream stream:\n")
+    selected_stream = prompt_choice(
+        "Select MySQL AppStream stream",
+        available_streams,
+        default=default_stream,
+    )
+
+    # ── Step 2: Apply stream if != 8.0 (8.0 is the default, no action needed) ─
+    if selected_stream != "8.0":
+        print_info(f"Applying AppStream stream mysql:{selected_stream} on master node...\n")
+        disable_cmd = "dnf module disable mysql -y 2>&1"
+        enable_cmd  = f"dnf module enable mysql:{selected_stream} -y 2>&1"
+        r1 = run_ansible_shell(master_ip, INVENTORY_FILE, disable_cmd)
+        if r1.returncode != 0:
+            print_warning("dnf module disable mysql returned non-zero — continuing anyway.")
+        r2 = run_ansible_shell(master_ip, INVENTORY_FILE, enable_cmd)
+        if r2.returncode != 0:
+            print_warning(f"dnf module enable mysql:{selected_stream} returned non-zero — continuing anyway.")
+        else:
+            print_success(f"AppStream stream mysql:{selected_stream} enabled.")
+    else:
+        print_info("Stream 8.0 selected — no module switch needed.\n")
+
+    # ── Step 3: List available versions from the selected stream ──────────────
+    print_info(f"Querying available mysql-server versions from stream {selected_stream}...\n")
     list_cmd = (
         "dnf list --showduplicates mysql-server -q 2>/dev/null | "
         "awk '/^mysql-server/{v=$2; sub(/^[0-9]*:/,\"\",v); sub(/-.*/,\"\",v); print v}' | "
@@ -1305,24 +1333,26 @@ def select_mysql_version_redhat(config):
         v for v in _parse_ansible_output(result) if re.match(r'^\d+\.\d+\.\d+', v)
     ]
 
+    # ── Step 4: Version selection ─────────────────────────────────────────────
     if not available_versions:
         print_warning("Could not list available mysql-server versions from repositories.")
-        print_hint("Common versions: 8.0.36, 8.4.3, 9.0.1")
-        mysql_version_full = prompt_input("MySQL version to install", default="8.0.36")
+        print_hint(f"Common versions for stream {selected_stream}: "
+                   f"{'8.0.36, 8.0.40' if selected_stream == '8.0' else '8.4.3, 8.4.5'}")
+        mysql_version_full = prompt_input(
+            "MySQL version to install",
+            default="8.0.36" if selected_stream == "8.0" else "8.4.3",
+        )
     else:
-        print_info("Available mysql-server versions in current repositories:\n")
+        print_info(f"Available mysql-server versions (stream {selected_stream}):\n")
         mysql_version_full = prompt_choice(
             "Select MySQL version to install",
             available_versions,
             default=available_versions[-1],
         )
 
-    # Derive AppStream stream from the selected version (e.g. "8.4.3" -> "8.4")
-    mysql_version = ".".join(mysql_version_full.split(".")[:2])
-
-    config["mysql_version"] = mysql_version
+    config["mysql_version"] = selected_stream
     config["mysql_version_full"] = mysql_version_full
-    print_success(f"MySQL {mysql_version_full} (stream: {mysql_version}) selected.")
+    print_success(f"MySQL {mysql_version_full} (stream: {selected_stream}) selected.")
     save_config(config)
     return config
 

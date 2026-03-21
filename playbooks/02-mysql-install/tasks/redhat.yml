@@ -5,6 +5,16 @@
     _mysql_server_pkg: "{{ 'mysql-server-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql-server' }}"
     _mysql_client_pkg: "{{ 'mysql-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql' }}"
 
+- name: Disable default MySQL AppStream module
+  shell: dnf module disable mysql -y
+  changed_when: false
+  when: mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
+
+- name: Enable selected MySQL AppStream stream
+  shell: "dnf module enable mysql:{{ mysql_version }} -y"
+  changed_when: false
+  when: mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
+
 - name: Install MySQL packages (RedHat)
   package:
     name:
