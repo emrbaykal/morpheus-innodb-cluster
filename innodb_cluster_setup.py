@@ -23,6 +23,7 @@ import json
 import subprocess
 import shutil
 import socket
+import stat
 import time
 import re
 import signal
@@ -1543,10 +1544,15 @@ def generate_report(config, returncode, output_lines, elapsed, pre_check_results
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
-    # Suppress wall/broadcast messages (e.g. systemd-journald) from appearing
-    # in the terminal during script execution.
-    subprocess.run(["mesg", "n"], check=False,
-                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+    # Suppress wall/broadcast messages (e.g. systemd-journald) by removing
+    # the group/other write bits from the controlling TTY directly.
+    # More reliable than `mesg n` when running as root via sudo.
+    try:
+        tty_path = os.ttyname(sys.stdin.fileno())
+        tty_stat = os.stat(tty_path)
+        os.chmod(tty_path, tty_stat.st_mode & ~(stat.S_IWGRP | stat.S_IWOTH))
+    except Exception:
+        pass
 
     print_banner()
 
