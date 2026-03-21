@@ -66,7 +66,7 @@ ANSIBLE_COLLECTIONS = [
     "community.mysql",
 ]
 
-TOTAL_STEPS = 10
+TOTAL_STEPS = 11
 
 
 # ─── Colors & Formatting ────────────────────────────────────────────────────
@@ -1134,6 +1134,52 @@ def check_mysql_packages_on_nodes(config):
     return pre_check_results
 
 
+def check_internet_connectivity(config):
+    """Verify that all cluster nodes can reach dev.mysql.com (TCP 443).
+    Required for downloading the MySQL community release RPM during the playbook.
+    """
+    print_step(7, "INTERNET CONNECTIVITY CHECK")
+    print_info("Checking connectivity to dev.mysql.com on all nodes...\n")
+
+    nodes = config["nodes"]
+    roles = ["Master", "Slave 1", "Slave 2"]
+
+    # Use bash /dev/tcp – no curl/wget dependency required
+    check_cmd = (
+        '(echo > /dev/tcp/dev.mysql.com/443) 2>/dev/null '
+        '&& echo "REACHABLE" || echo "UNREACHABLE"'
+    )
+
+    any_unreachable = False
+
+    for i, node in enumerate(nodes):
+        ip = node["ip"]
+        label = f"{node['hostname']} ({ip})"
+        sys.stdout.write(f"  {Colors.CYAN}[{roles[i]:>8}] Checking {label}...{Colors.END}")
+        sys.stdout.flush()
+
+        result = run_ansible_shell(ip, INVENTORY_FILE, check_cmd)
+        output = " ".join(_parse_ansible_output(result))
+        reachable = result.returncode == 0 and "REACHABLE" in output and "UNREACHABLE" not in output
+
+        if reachable:
+            print(f"\r  {Colors.GREEN}✓ [{roles[i]:>8}] {label:<40} dev.mysql.com OK{Colors.END}")
+        else:
+            print(f"\r  {Colors.RED}✗ [{roles[i]:>8}] {label:<40} dev.mysql.com UNREACHABLE{Colors.END}")
+            any_unreachable = True
+
+    print()
+    if any_unreachable:
+        print_warning("One or more nodes cannot reach dev.mysql.com!")
+        print_warning("The playbook requires this to download the MySQL community release RPM.")
+        print()
+        if not prompt_yes_no("Continue despite connectivity issues?", default_yes=False):
+            print_info("Operation cancelled. Please check network/firewall settings and re-run.")
+            sys.exit(1)
+    else:
+        print_success("All nodes can reach dev.mysql.com.")
+
+
 def _parse_ansible_output(result):
     """Extract lines after the '>>' header from an ansible shell result."""
     lines = []
@@ -1170,7 +1216,7 @@ def select_mysql_version_redhat(config):
     if not is_redhat_family:
         return config
 
-    print_step(7, "MYSQL VERSION SELECTION")
+    print_step(8, "MYSQL VERSION SELECTION")
     print_info("RedHat-family OS detected. Querying available mysql-server versions...\n")
 
     # If already fully configured, confirm and skip
@@ -1246,7 +1292,7 @@ def build_extra_vars(config):
 
 def run_playbook(config):
     """Run the Ansible playbook with real-time output."""
-    print_step(9, "RUNNING ANSIBLE PLAYBOOK")
+    print_step(10, "RUNNING ANSIBLE PLAYBOOK")
 
     extra_vars = build_extra_vars(config)
 
@@ -1330,7 +1376,7 @@ def parse_ansible_recap(output_lines):
 
 def generate_report(config, returncode, output_lines, elapsed, pre_check_results=None, repo_check_results=None):
     """Generate a detailed setup report."""
-    print_step(10, "SETUP REPORT")
+    print_step(11, "SETUP REPORT")
 
     recap = parse_ansible_recap(output_lines)
     nodes = config["nodes"]
@@ -1525,11 +1571,14 @@ def main():
     # Step 6: Pre-existing MySQL package check
     pre_check_results = check_mysql_packages_on_nodes(config)
 
-    # Step 7: MySQL version selection (RedHat only)
+    # Step 7: Internet connectivity check (dev.mysql.com)
+    check_internet_connectivity(config)
+
+    # Step 8: MySQL version selection (RedHat only)
     config = select_mysql_version_redhat(config)
 
-    # Step 8: Deployment confirmation
-    print_step(8, "DEPLOYMENT CONFIRMATION")
+    # Step 9: Deployment confirmation
+    print_step(9, "DEPLOYMENT CONFIRMATION")
 
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
@@ -1550,10 +1599,10 @@ def main():
         print_info("Deployment cancelled.")
         sys.exit(0)
 
-    # Step 9: Run playbook
+    # Step 10: Run playbook
     returncode, output_lines, elapsed = run_playbook(config)
 
-    # Step 10: Generate report
+    # Step 11: Generate report
     status = generate_report(config, returncode, output_lines, elapsed, pre_check_results, repo_check_results)
 
     # Final message

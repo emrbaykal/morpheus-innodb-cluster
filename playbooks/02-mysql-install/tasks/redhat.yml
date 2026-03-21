@@ -1,22 +1,5 @@
 ---
 
-- name: Determine CRB repository name
-  set_fact:
-    crb_repo_name: "{{ 'crb' if ansible_distribution in ['Rocky', 'AlmaLinux'] else 'codeready-builder-for-rhel-' + ansible_distribution_major_version + '-x86_64-rpms' }}"
-
-- name: Check if CRB repository is already enabled
-  shell: dnf repolist enabled 2>/dev/null | grep -q "^{{ crb_repo_name }}"
-  register: crb_status
-  changed_when: false
-  failed_when: false
-
-
-- name: Enable CodeReady Builder repository
-  command: dnf config-manager --set-enabled {{ crb_repo_name }}
-  when: crb_status.rc != 0
-
-
-
 - name: Set MySQL package names based on selected version
   set_fact:
     _mysql_server_pkg: "{{ 'mysql-server-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql-server' }}"
@@ -28,7 +11,6 @@
       - "{{ _mysql_server_pkg }}"
       - "{{ _mysql_client_pkg }}"
       - python3-PyMySQL
-      - mysql-devel
       - numactl
     state: present
 
