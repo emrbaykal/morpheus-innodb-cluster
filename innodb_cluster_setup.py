@@ -66,7 +66,7 @@ ANSIBLE_COLLECTIONS = [
     "community.mysql",
 ]
 
-TOTAL_STEPS = 9
+TOTAL_STEPS = 10
 
 
 # ─── Colors & Formatting ────────────────────────────────────────────────────
@@ -593,6 +593,7 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
         config['innodb_cluster_name'],
         config.get('ntp_primary', 'time.google.com'),
         config.get('ntp_fallback', 'pool.ntp.org'),
+        config.get('mysql_version', ''),
     ]
     max_val_len = max(len(v) for v in all_values if v)
     COL2 = max(37, max_val_len + 4)  # +4 for padding (2 each side)
@@ -632,6 +633,8 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
     _row("Cluster Admin Password", "", mask=True)
     _row("Cluster Name", config['innodb_cluster_name'])
     _row("Router User (routeruser)", "", mask=True)
+    if config.get("mysql_version"):
+        _row("MySQL Version (AppStream)", config["mysql_version"])
 
     _separator()
     _section_header("SYSTEM SETTINGS")
@@ -1123,6 +1126,77 @@ def check_mysql_packages_on_nodes(config):
     return pre_check_results
 
 
+def select_mysql_version_redhat(config):
+    """If the cluster nodes run a RedHat-family OS, list available MySQL
+    AppStream module streams and ask the user which version to install.
+    The selection is saved into config and persisted to cluster_config.json.
+    Returns config (possibly updated).
+    """
+    master_ip = config["nodes"][0]["ip"]
+
+    # Detect OS family on master node via /etc/os-release
+    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID_LIKE:-${ID:-unknown}}"'
+    result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
+
+    os_family = "unknown"
+    if result.returncode == 0:
+        past_header = False
+        for line in (result.stdout or "").strip().split('\n'):
+            if past_header and line.strip():
+                os_family = line.strip().lower()
+                break
+            if ">>" in line:
+                past_header = True
+
+    is_redhat_family = any(d in os_family for d in ("rhel", "centos", "fedora", "rocky", "alma"))
+    if not is_redhat_family:
+        return config
+
+    print_step(7, "MYSQL VERSION SELECTION")
+    print_info("RedHat-family OS detected. AppStream üzerindeki MySQL modül akışları sorgulanıyor...\n")
+
+    # If version already configured (e.g. re-run with existing config), confirm and skip
+    if config.get("mysql_version"):
+        print_success(f"MySQL version already configured: {config['mysql_version']}")
+        if prompt_yes_no("Keep this version?", default_yes=True):
+            return config
+        # Otherwise fall through to re-select
+
+    # Query available AppStream MySQL module streams on master node
+    list_cmd = (
+        "dnf module list mysql -q 2>/dev/null | "
+        "awk '/^mysql/{v=$2; sub(/\\[.*\\]$/,\"\",v); print v}' | sort -u"
+    )
+    result = run_ansible_shell(master_ip, INVENTORY_FILE, list_cmd)
+
+    available_versions = []
+    if result.returncode == 0:
+        past_header = False
+        for line in (result.stdout or "").strip().split('\n'):
+            if past_header and line.strip():
+                v = line.strip()
+                if re.match(r'^\d+\.\d+', v):
+                    available_versions.append(v)
+            if ">>" in line:
+                past_header = True
+
+    if not available_versions:
+        print_warning("AppStream MySQL modül akışları otomatik olarak listelenemedi.")
+        print_hint("Yaygın versiyonlar: 8.0, 8.4, 9.0")
+        mysql_version = prompt_input("Kurulacak MySQL versiyonu", default="8.0")
+    else:
+        print_info("Mevcut AppStream MySQL modül akışları:\n")
+        default_ver = available_versions[0]
+        mysql_version = prompt_choice(
+            "Kurulacak MySQL versiyonunu seçin", available_versions, default=default_ver
+        )
+
+    config["mysql_version"] = mysql_version
+    print_success(f"MySQL version {mysql_version} seçildi.")
+    save_config(config)
+    return config
+
+
 def build_extra_vars(config):
     """Build the extra-vars JSON for ansible-playbook.
 
@@ -1146,13 +1220,14 @@ def build_extra_vars(config):
         "router_password": config.get("router_password", ""),
         "ntp_primary": config.get("ntp_primary", "time.google.com"),
         "ntp_fallback": config.get("ntp_fallback", "pool.ntp.org"),
+        "mysql_version": config.get("mysql_version", ""),
     }
     return json.dumps(extra_vars)
 
 
 def run_playbook(config):
     """Run the Ansible playbook with real-time output."""
-    print_step(8, "RUNNING ANSIBLE PLAYBOOK")
+    print_step(9, "RUNNING ANSIBLE PLAYBOOK")
 
     extra_vars = build_extra_vars(config)
 
@@ -1236,7 +1311,7 @@ def parse_ansible_recap(output_lines):
 
 def generate_report(config, returncode, output_lines, elapsed, pre_check_results=None, repo_check_results=None):
     """Generate a detailed setup report."""
-    print_step(9, "SETUP REPORT")
+    print_step(10, "SETUP REPORT")
 
     recap = parse_ansible_recap(output_lines)
     nodes = config["nodes"]
@@ -1426,8 +1501,11 @@ def main():
     # Step 6: Pre-existing MySQL package check
     pre_check_results = check_mysql_packages_on_nodes(config)
 
-    # Step 7: Deployment confirmation
-    print_step(7, "DEPLOYMENT CONFIRMATION")
+    # Step 7: MySQL version selection (RedHat only)
+    config = select_mysql_version_redhat(config)
+
+    # Step 8: Deployment confirmation
+    print_step(8, "DEPLOYMENT CONFIRMATION")
 
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
@@ -1448,10 +1526,10 @@ def main():
         print_info("Deployment cancelled.")
         sys.exit(0)
 
-    # Step 6: Run playbook
+    # Step 9: Run playbook
     returncode, output_lines, elapsed = run_playbook(config)
 
-    # Step 7: Generate report
+    # Step 10: Generate report
     status = generate_report(config, returncode, output_lines, elapsed, pre_check_results, repo_check_results)
 
     # Final message

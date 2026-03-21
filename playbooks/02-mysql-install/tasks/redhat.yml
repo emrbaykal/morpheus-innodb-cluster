@@ -16,6 +16,13 @@
   when: crb_status.rc != 0
 
 
+- name: Enable MySQL AppStream module stream
+  command: dnf module enable mysql:{{ mysql_version }} -y
+  when:
+    - mysql_version is defined
+    - mysql_version != ""
+
+
 - name: Install MySQL packages (RedHat)
   package:
     name:
@@ -26,13 +33,34 @@
       - numactl
     state: present
 
-- name: Determine mysql-shell RPM URL based on EL version
+- name: Set MySQL community release RPM URL based on EL version
   set_fact:
-    mysql_shell_rpm: "https://repo.mysql.com/yum/mysql-tools-community/el/{{ ansible_distribution_major_version }}/x86_64/mysql-shell-8.0.44-1.el{{ ansible_distribution_major_version }}.x86_64.rpm"
+    mysql_community_release_rpm: "{{ 'https://dev.mysql.com/get/mysql84-community-release-el8-2.noarch.rpm' if ansible_distribution_major_version | int == 8 else 'https://dev.mysql.com/get/mysql84-community-release-el9-3.noarch.rpm' }}"
 
-- name: Install mysql-shell from MySQL repository
+- name: Install MySQL community release RPM (adds repo definitions)
   yum:
-    name: "{{ mysql_shell_rpm }}"
+    name: "{{ mysql_community_release_rpm }}"
+    state: present
+    disable_gpg_check: yes
+
+- name: Disable all MySQL community repositories
+  shell: dnf config-manager --disable 'mysql*'
+  changed_when: false
+
+- name: Enable mysql-tools-community repository only
+  command: dnf config-manager --enable mysql-tools-community
+
+- name: Get installed mysql-server version
+  shell: >
+    rpm -q --queryformat "%{VERSION}" mysql-server 2>/dev/null ||
+    rpm -q --queryformat "%{VERSION}" mysql-community-server 2>/dev/null
+  register: _mysql_installed_ver
+  changed_when: false
+  failed_when: _mysql_installed_ver.stdout == ""
+
+- name: Install mysql-shell matching installed MySQL server version
+  yum:
+    name: "mysql-shell-{{ _mysql_installed_ver.stdout }}"
     state: present
     disable_gpg_check: yes
 
