@@ -37,10 +37,9 @@
     mysql_community_release_rpm: "{{ 'https://dev.mysql.com/get/mysql84-community-release-el8-2.noarch.rpm' if ansible_distribution_major_version | int == 8 else 'https://dev.mysql.com/get/mysql84-community-release-el9-3.noarch.rpm' }}"
 
 - name: Install MySQL community release RPM (adds repo definitions)
-  yum:
-    name: "{{ mysql_community_release_rpm }}"
-    state: present
-    disable_gpg_check: yes
+  shell: "dnf install -y --nogpgcheck {{ mysql_community_release_rpm }}"
+  register: _mysql_repo_result
+  changed_when: "'Nothing to do' not in _mysql_repo_result.stdout"
 
 - name: Disable all MySQL community repositories
   shell: dnf config-manager --disable 'mysql*'
