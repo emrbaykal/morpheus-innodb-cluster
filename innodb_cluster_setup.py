@@ -1497,6 +1497,11 @@ def generate_report(config, returncode, output_lines, elapsed, pre_check_results
 # ─── Main ─────────────────────────────────────────────────────────────────────
 
 def main():
+    # Suppress wall/broadcast messages (e.g. systemd-journald) from appearing
+    # in the terminal during script execution.
+    subprocess.run(["mesg", "n"], check=False,
+                   stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+
     print_banner()
 
     # Check root
