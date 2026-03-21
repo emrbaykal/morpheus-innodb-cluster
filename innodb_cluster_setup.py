@@ -1165,10 +1165,11 @@ def check_internet_connectivity(config):
 
     print_info(f"Checking connectivity to {target_host} on all nodes...\n")
 
-    # Use bash /dev/tcp – no curl/wget dependency required
+    # Use bash /dev/tcp – no curl/wget dependency required.
+    # Explicitly invoke bash because Ubuntu's /bin/sh (dash) does not support /dev/tcp.
     check_cmd = (
-        f'(echo > /dev/tcp/{target_host}/443) 2>/dev/null '
-        '&& echo "REACHABLE" || echo "UNREACHABLE"'
+        f'bash -c "(echo > /dev/tcp/{target_host}/443) 2>/dev/null '
+        '&& echo REACHABLE || echo UNREACHABLE"'
     )
 
     any_unreachable = False
