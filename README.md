@@ -23,7 +23,7 @@ The script automatically installs all missing components on the local node:
 
 ### On all 3 target cluster nodes
 
-- Ubuntu 22.04 / 24.04 **or** RHEL / CentOS 8+
+- Ubuntu 22.04 / 24.04 **or** RHEL 8 / 9
 - SSH access (key-based or password)
 - `sudo` privileges
 - Internet access to `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat)
@@ -153,104 +153,6 @@ All applied roles listed with descriptions. Next steps for cluster management an
 
 ---
 
-## What's New
-
-### MySQL Version Selection (Ubuntu & RedHat)
-
-Both OS families now have an interactive MySQL version selection step (Step 8/11) before deployment.
-
-**Ubuntu / Debian — APT Stream Selection:**
-
-```
-  [Step 8/11] MYSQL VERSION SELECTION
-
-  Select MySQL version to install:
-    1. mysql-8.0  ← default
-    2. mysql-8.4-lts
-  Choice [1]:
-```
-
-The selection is pre-seeded into `debconf` via `mysql-apt-config` and applied during package installation. The selected version is also shown in the configuration summary:
-
-```
-│ MySQL APT Version            │ mysql-8.4-lts                       │
-```
-
-**RedHat / CentOS — AppStream Stream + Version Selection:**
-
-Version selection is a two-phase process:
-
-**Phase 1 — AppStream stream selection:**
-```
-  Select MySQL AppStream stream:
-    1. 8.0  ← default
-    2. 8.4
-  Choice [1]:
-```
-
-If stream `8.4` is selected, the script runs on the master node:
-```bash
-dnf module disable mysql -y
-dnf module enable mysql:8.4 -y
-```
-Stream `8.0` is the AppStream default — no module change is applied.
-
-**Phase 2 — Package version selection:**
-After the stream is activated, available versions are queried live from the repository:
-```
-  Available mysql-server versions (stream 8.4):
-
-  Select MySQL version to install:
-    1. 8.4.4
-    2. 8.4.6
-    3. 8.4.7  ← default
-  Choice [3]:
-```
-
-All selections are number-based — typing a version string directly is not accepted.
-
----
-
-### OS-Aware Internet Connectivity Check
-
-Step 7 now detects the OS on the master node and checks the correct MySQL package repository for each OS family:
-
-| OS Family | Host Checked | Port |
-|-----------|-------------|------|
-| Ubuntu / Debian | `repo.mysql.com` | 443 |
-| RedHat / CentOS | `dev.mysql.com` | 443 |
-
-The check uses `bash -c "(echo > /dev/tcp/...)"`  — no `curl` or `wget` dependency required. Explicitly invokes `bash` (not `sh`) to ensure `/dev/tcp` support on Ubuntu where `/bin/sh` is `dash`.
-
----
-
-### APT Pinning for Ubuntu (repo.mysql.com Priority)
-
-After adding the MySQL APT repository, an APT preferences file is deployed to ensure all MySQL packages are installed from `repo.mysql.com` rather than the Ubuntu default repositories:
-
-```
-/etc/apt/preferences.d/mysql
-  Pin: origin repo.mysql.com
-  Pin-Priority: 1001
-```
-
-Priority `1001` overrides the Ubuntu default (`500`) and ensures the MySQL official repository is always preferred, even for downgrades.
-
----
-
-### Stream-Aware mysql-shell Installation (RedHat)
-
-`mysql-shell` is sourced from the MySQL Community Tools repository matching the selected stream:
-
-| Stream | Repository Enabled |
-|--------|-------------------|
-| `8.0`  | `mysql-tools-community` |
-| `8.4`  | `mysql-tools-8.4-lts-community` |
-
-After the correct repository is enabled, the installed `mysql-server` version is queried via `rpm` and the exact matching `mysql-shell-<version>` package is installed — ensuring full compatibility between server and shell.
-
----
-
 ## Directory Structure
 
 ```
@@ -267,7 +169,7 @@ morpheus-innodb-cluster/
 │   │   ├── tasks/
 │   │   │   ├── main.yml              # OS-family dispatcher
 │   │   │   ├── debian.yml            # Ubuntu/Debian tasks
-│   │   │   └── redhat.yml            # RHEL/CentOS/Rocky/Alma tasks
+│   │   │   └── redhat.yml            # RHEL tasks
 │   │   ├── handlers/main.yml
 │   │   ├── files/issue.net           # SSH login banner text
 │   │   └── meta/main.yml
@@ -367,7 +269,7 @@ All values are saved to `cluster_config.json` (mode `0600`). On subsequent runs 
 
 Applied to all nodes. Hardens the OS and tunes kernel parameters for database workloads.
 
-| Task | Debian/Ubuntu | RedHat/CentOS |
+| Task | Debian/Ubuntu | RedHat |
 |------|--------------|---------------|
 | SSH banner | Deploy to `/etc/issue.net`, drop-in `/etc/ssh/sshd_config.d/99-banner.conf` | Deploy to `/etc/issue.net`, update `sshd_config` (EL8) or drop-in (EL9) |
 | Security framework | Stop & disable AppArmor | SELinux → permissive |
@@ -409,7 +311,7 @@ mysql hard memlock unlimited
 
 Applied to all nodes. Installs MySQL from the official MySQL repository. The version is selected interactively in Step 8 before deployment.
 
-| Task | Debian/Ubuntu | RedHat/CentOS |
+| Task | Debian/Ubuntu | RedHat |
 |------|--------------|---------------|
 | Repository | `mysql-apt-config` deb from `repo.mysql.com` | MySQL Community Release RPM (EL8/EL9 auto-detected) |
 | APT Pinning | `repo.mysql.com` pinned at priority 1001 | — |
