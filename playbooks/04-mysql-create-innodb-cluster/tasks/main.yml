@@ -116,8 +116,8 @@
        mysqlsh --defaults-file=/tmp/.mylogin.cnf --no-wizard --js --file=/tmp/configure_instance.js
   register: mysqlsh_output
   until: mysqlsh_output.rc == 0
-  retries: 5
-  delay: 5
+  retries: 20
+  delay: 30
 
 - name: Display MySQL Shell output
   debug:

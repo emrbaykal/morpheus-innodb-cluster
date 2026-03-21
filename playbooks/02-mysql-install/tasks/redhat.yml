@@ -7,13 +7,31 @@
 
 - name: Disable default MySQL AppStream module
   shell: dnf module disable mysql -y
+  register: _dnf_module_disable
   changed_when: false
+  failed_when: false
   when: mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
+
+- name: Log AppStream module disable result
+  debug:
+    msg: "{{ _dnf_module_disable.stdout_lines | default([]) + _dnf_module_disable.stderr_lines | default([]) }}"
+  when:
+    - mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
+    - _dnf_module_disable.rc | default(0) != 0
 
 - name: Enable selected MySQL AppStream stream
   shell: "dnf module enable mysql:{{ mysql_version }} -y"
+  register: _dnf_module_enable
   changed_when: false
+  failed_when: false
   when: mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
+
+- name: Log AppStream module enable result
+  debug:
+    msg: "{{ _dnf_module_enable.stdout_lines | default([]) + _dnf_module_enable.stderr_lines | default([]) }}"
+  when:
+    - mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
+    - _dnf_module_enable.rc | default(0) != 0
 
 - name: Install MySQL packages (RedHat)
   package:

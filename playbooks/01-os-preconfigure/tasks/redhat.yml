@@ -75,20 +75,20 @@
     name: chrony
     state: present
 
-- name: Set primary NTP server in chrony
-  lineinfile:
+- name: Comment out existing server/pool lines in chrony.conf
+  replace:
     path: /etc/chrony.conf
     regexp: '^(server|pool)\s+'
-    line: "server {{ ntp_primary }} iburst"
-    insertafter: '^#.*server'
+    replace: '# \1 '
   notify: restart_chronyd
 
-- name: Set fallback NTP server in chrony
-  lineinfile:
+- name: Configure NTP servers in chrony
+  blockinfile:
     path: /etc/chrony.conf
-    regexp: '^server\s+{{ ntp_fallback }}'
-    line: "server {{ ntp_fallback }} iburst"
-    insertafter: '^server\s+{{ ntp_primary }}'
+    marker: "# {mark} ANSIBLE MANAGED NTP SERVERS"
+    block: |
+      server {{ ntp_primary }} iburst
+      server {{ ntp_fallback }} iburst
   notify: restart_chronyd
 
 - name: Enable NTP synchronization
