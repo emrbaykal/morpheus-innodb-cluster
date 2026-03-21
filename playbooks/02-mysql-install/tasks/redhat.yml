@@ -128,7 +128,7 @@
 - name: Set root user password (first run - socket auth)
   command: >
     mysql -u root -e
-    "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
+    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
   when: mysql_root_nopass.rc == 0
   no_log: true
 
