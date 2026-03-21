@@ -640,6 +640,8 @@ def display_config_summary(config, title="CONFIGURATION SUMMARY"):
         _row("MySQL AppStream Stream", config.get("mysql_version", ""))
     elif config.get("mysql_version"):
         _row("MySQL AppStream Stream", config["mysql_version"])
+    elif config.get("mysql_apt_version"):
+        _row("MySQL APT Version", config["mysql_apt_version"])
 
     _separator()
     _section_header("SYSTEM SETTINGS")
