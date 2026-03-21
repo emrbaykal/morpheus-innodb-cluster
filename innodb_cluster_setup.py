@@ -1045,6 +1045,10 @@ def check_rhel_repos_on_nodes(config):
         print_warning("One or more required RHEL repositories are NOT enabled!")
         print_warning("Enable missing repos with:")
         print_hint("  subscription-manager repos --enable=<repo-name>")
+        print()
+        if not prompt_yes_no("Continue despite missing repositories?", default_yes=False):
+            print_info("Operation cancelled. Please enable the required repositories and re-run.")
+            sys.exit(1)
     else:
         print_success("All required RHEL repositories are enabled.")
 
