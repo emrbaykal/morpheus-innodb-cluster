@@ -1136,18 +1136,38 @@ def check_mysql_packages_on_nodes(config):
 
 
 def check_internet_connectivity(config):
-    """Verify that all cluster nodes can reach dev.mysql.com (TCP 443).
-    Required for downloading the MySQL community release RPM during the playbook.
+    """Verify that all cluster nodes can reach the MySQL package repository (TCP 443).
+    Uses repo.mysql.com for Debian/Ubuntu and dev.mysql.com for RHEL-based systems.
     """
     print_step(7, "INTERNET CONNECTIVITY CHECK")
-    print_info("Checking connectivity to dev.mysql.com on all nodes...\n")
 
     nodes = config["nodes"]
     roles = ["Master", "Slave 1", "Slave 2"]
 
+    # Detect OS on master node to pick the correct target host
+    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID:-unknown}"'
+    master_ip = nodes[0]["ip"]
+    os_result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
+    os_id = "unknown"
+    if os_result.returncode == 0:
+        past_header = False
+        for line in (os_result.stdout or "").strip().split('\n'):
+            if past_header and line.strip():
+                os_id = line.strip().lower()
+                break
+            if ">>" in line:
+                past_header = True
+
+    if any(d in os_id for d in ("ubuntu", "debian")):
+        target_host = "repo.mysql.com"
+    else:
+        target_host = "dev.mysql.com"
+
+    print_info(f"Checking connectivity to {target_host} on all nodes...\n")
+
     # Use bash /dev/tcp – no curl/wget dependency required
     check_cmd = (
-        '(echo > /dev/tcp/dev.mysql.com/443) 2>/dev/null '
+        f'(echo > /dev/tcp/{target_host}/443) 2>/dev/null '
         '&& echo "REACHABLE" || echo "UNREACHABLE"'
     )
 
@@ -1164,21 +1184,21 @@ def check_internet_connectivity(config):
         reachable = result.returncode == 0 and "REACHABLE" in output and "UNREACHABLE" not in output
 
         if reachable:
-            print(f"\r  {Colors.GREEN}✓ [{roles[i]:>8}] {label:<40} dev.mysql.com OK{Colors.END}")
+            print(f"\r  {Colors.GREEN}✓ [{roles[i]:>8}] {label:<40} {target_host} OK{Colors.END}")
         else:
-            print(f"\r  {Colors.RED}✗ [{roles[i]:>8}] {label:<40} dev.mysql.com UNREACHABLE{Colors.END}")
+            print(f"\r  {Colors.RED}✗ [{roles[i]:>8}] {label:<40} {target_host} UNREACHABLE{Colors.END}")
             any_unreachable = True
 
     print()
     if any_unreachable:
-        print_warning("One or more nodes cannot reach dev.mysql.com!")
-        print_warning("The playbook requires this to download the MySQL community release RPM.")
+        print_warning(f"One or more nodes cannot reach {target_host}!")
+        print_warning("The playbook requires this to download the MySQL community release package.")
         print()
         if not prompt_yes_no("Continue despite connectivity issues?", default_yes=False):
             print_info("Operation cancelled. Please check network/firewall settings and re-run.")
             sys.exit(1)
     else:
-        print_success("All nodes can reach dev.mysql.com.")
+        print_success(f"All nodes can reach {target_host}.")
 
 
 def _parse_ansible_output(result):
