@@ -23,11 +23,16 @@
     - mysql_version != ""
 
 
+- name: Set MySQL package names based on selected version
+  set_fact:
+    _mysql_server_pkg: "{{ 'mysql-server-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql-server' }}"
+    _mysql_client_pkg: "{{ 'mysql-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql' }}"
+
 - name: Install MySQL packages (RedHat)
   package:
     name:
-      - mysql-server
-      - mysql
+      - "{{ _mysql_server_pkg }}"
+      - "{{ _mysql_client_pkg }}"
       - python3-PyMySQL
       - mysql-devel
       - numactl
