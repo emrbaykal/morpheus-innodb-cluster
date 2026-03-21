@@ -6,9 +6,9 @@
     dest: /tmp/mysql-apt-config_0.8.36-1_all.deb
     mode: '0644'
 
-- name: Pre-seed mysql-apt-config to select MySQL 8.0
+- name: Pre-seed mysql-apt-config to select MySQL version
   shell: |
-    echo "mysql-apt-config mysql-apt-config/select-server select mysql-8.0" | debconf-set-selections
+    echo "mysql-apt-config mysql-apt-config/select-server select {{ mysql_apt_version }}" | debconf-set-selections
   changed_when: false
 
 - name: Install mysql-apt-config package
@@ -21,6 +21,17 @@
 - name: Update apt cache
   apt:
     update_cache: yes
+
+- name: Pin MySQL packages to repo.mysql.com
+  copy:
+    dest: /etc/apt/preferences.d/mysql
+    content: |
+      Package: mysql-server mysql-client mysql-shell libmysqlclient-dev mysql-community-server mysql-community-client
+      Pin: origin repo.mysql.com
+      Pin-Priority: 1001
+    owner: root
+    group: root
+    mode: '0644'
 
 - name: Install MySQL packages (Debian)
   apt:

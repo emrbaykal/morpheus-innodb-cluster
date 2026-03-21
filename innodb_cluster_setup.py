@@ -1216,6 +1216,48 @@ def _parse_ansible_output(result):
     return lines
 
 
+def select_mysql_version_debian(config):
+    """If the cluster nodes run a Debian/Ubuntu OS, ask the user which
+    MySQL apt-config stream to install (e.g. mysql-8.0 or mysql-8.4-lts).
+
+    The selection is saved to config['mysql_apt_version'] and passed to
+    Ansible as an extra-var so that debian.yml can debconf-set-selections
+    with the correct value.
+    Returns config (possibly updated).
+    """
+    master_ip = config["nodes"][0]["ip"]
+
+    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID:-unknown}"'
+    result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
+    os_id = " ".join(_parse_ansible_output(result)).lower()
+
+    is_debian_family = any(d in os_id for d in ("ubuntu", "debian"))
+    if not is_debian_family:
+        return config
+
+    print_step(8, "MYSQL VERSION SELECTION")
+
+    available_versions = ["mysql-8.0", "mysql-8.4-lts"]
+    default_version = config.get("mysql_apt_version", "mysql-8.0")
+
+    if config.get("mysql_apt_version"):
+        print_success(f"MySQL version already configured: {config['mysql_apt_version']}")
+        if prompt_yes_no("Keep this version?", default_yes=True):
+            return config
+
+    print_info("Debian/Ubuntu detected. Select the MySQL version to install:\n")
+    selected = prompt_choice(
+        "Select MySQL version to install",
+        available_versions,
+        default=default_version,
+    )
+
+    config["mysql_apt_version"] = selected
+    print_success(f"MySQL apt version '{selected}' selected.")
+    save_config(config)
+    return config
+
+
 def select_mysql_version_redhat(config):
     """If the cluster nodes run a RedHat-family OS, list all available
     mysql-server versions from the current repositories using:
@@ -1308,6 +1350,7 @@ def build_extra_vars(config):
         "ntp_fallback": config.get("ntp_fallback", "pool.ntp.org"),
         "mysql_version": config.get("mysql_version", ""),
         "mysql_version_full": config.get("mysql_version_full", ""),
+        "mysql_apt_version": config.get("mysql_apt_version", "mysql-8.0"),
     }
     return json.dumps(extra_vars)
 
@@ -1601,7 +1644,8 @@ def main():
     # Step 7: Internet connectivity check (dev.mysql.com)
     check_internet_connectivity(config)
 
-    # Step 8: MySQL version selection (RedHat only)
+    # Step 8: MySQL version selection (OS-specific)
+    config = select_mysql_version_debian(config)
     config = select_mysql_version_redhat(config)
 
     # Step 9: Deployment confirmation
