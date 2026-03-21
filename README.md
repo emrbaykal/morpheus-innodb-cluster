@@ -1,145 +1,16 @@
 # MySQL InnoDB Cluster — Morpheus Setup
 
-Automated deployment of a 3-node MySQL 8.0 InnoDB Cluster on Ubuntu and RedHat-based systems, orchestrated by a single interactive Python script backed by modular Ansible roles.
-
----
-
-## Screenshots
-
-### Step 1/7 — Environment Setup
-Detects the local OS family and automatically installs all required prerequisites (Ansible, sshpass, python3-pip, community.mysql collection).
-
-![Step 1 — Environment Setup](docs/screenshots/01-environment-setup.png)
-
----
-
-### Step 2/7 — Cluster Configuration (Nodes & SSH)
-Interactive wizard collects hostnames and IP addresses for all 3 cluster nodes, then SSH credentials (key or password authentication, sudo escalation).
-
-![Step 2 — Cluster Nodes & SSH](docs/screenshots/02-cluster-configuration-nodes-ssh.png)
-
----
-
-### Step 2/7 — Cluster Configuration (MySQL & System)
-Collects MySQL root and cluster admin credentials, cluster name, router user password, and NTP server settings.
-
-![Step 2 — MySQL Credentials & Settings](docs/screenshots/03-mysql-credentials-cluster-settings.png)
-
----
-
-### Configuration Summary
-All collected parameters are presented in a structured summary table before saving. User confirms with `y` to proceed.
-
-![Configuration Summary](docs/screenshots/04-configuration-summary.png)
-
----
-
-### Step 3 & 4/7 — Inventory Generation & SSH Connectivity Test
-Ansible inventory is auto-generated from collected inputs (IP-based, DNS-independent). SSH connectivity to all 3 nodes is validated before deployment.
-
-![Inventory Generation & SSH Test](docs/screenshots/05-inventory-ssh-test.png)
-
----
-
-### Step 5 & 6/7 — Deployment Confirmation & Ansible Execution
-Final confirmation before Ansible runs. Playbook output streams in real-time with all task results visible.
-
-![Deployment & Ansible Output](docs/screenshots/06-deployment-confirmation-ansible-output.png)
-
----
-
-### Step 7/7 — Play Recap & Setup Report
-Ansible PLAY RECAP parsed and presented as a structured node status table with success/failure counts.
-
-![Play Recap & Setup Report](docs/screenshots/07-play-recap-setup-report.png)
-
----
-
-### Applied Roles, Next Steps & File Locations
-All applied roles listed with descriptions. Next steps for cluster management and MySQL Router bootstrap provided.
-
-![Applied Roles & Next Steps](docs/screenshots/08-applied-roles-next-steps.png)
-
----
-
-## Directory Structure
-
-```
-morpheus-innodb-cluster/
-├── innodb_cluster_setup.py            # Main orchestrator script (v1.2.0)
-├── README.md
-│
-├── playbooks/
-│   ├── mysql-innodb.yml               # Main Ansible playbook entry point
-│   │
-│   ├── 01-os-preconfigure/            # Role: OS hardening & kernel tuning
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml              # sysctl parameters
-│   │   ├── tasks/
-│   │   │   ├── main.yml              # OS-family dispatcher
-│   │   │   ├── debian.yml            # Ubuntu/Debian tasks
-│   │   │   └── redhat.yml            # RHEL/CentOS/Rocky/Alma tasks
-│   │   ├── handlers/main.yml
-│   │   ├── files/issue.net           # SSH login banner text
-│   │   └── meta/main.yml
-│   │
-│   ├── 02-mysql-install/              # Role: MySQL 8.0 installation
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml
-│   │   ├── tasks/
-│   │   │   ├── main.yml              # OS-family dispatcher
-│   │   │   ├── debian.yml            # apt-based install + systemd drop-in
-│   │   │   └── redhat.yml            # dnf/yum-based install + systemd drop-in
-│   │   ├── handlers/main.yml
-│   │   └── meta/main.yml
-│   │
-│   ├── 03-mysql-innodb-cluster/       # Role: InnoDB Cluster pre-configuration
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml
-│   │   ├── tasks/main.yml
-│   │   ├── handlers/main.yml
-│   │   └── meta/main.yml
-│   │
-│   ├── 04-mysql-create-innodb-cluster/ # Role: Cluster creation (master node only)
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml
-│   │   ├── tasks/main.yml
-│   │   ├── handlers/main.yml
-│   │   └── meta/main.yml
-│   │
-│   # Generated at runtime:
-│   └── inventory.ini
-│
-# Generated at runtime:
-├── cluster_config.json                # Saved user configuration (reused on re-runs)
-├── cluster_setup.log                  # Full Ansible output log
-└── cluster_setup_report.txt           # Post-deployment summary report
-```
-
----
-
-## Supported Operating Systems
-
-| OS Family | Tested Distributions |
-|-----------|---------------------|
-| Debian    | Ubuntu 22.04 / 24.04 |
-| RedHat    | RHEL 8/9 |
-
-Playbooks automatically detect `ansible_os_family` and execute the appropriate tasks for each distribution.
+Automated deployment of a 3-node MySQL InnoDB Cluster on Ubuntu and RedHat-based systems, orchestrated by a single interactive Python script backed by modular Ansible roles.
 
 ---
 
 ## Prerequisites
 
-**On the node where you run the script:**
-- Python 3.6+ (`python3` package must be installed)
-- `sudo` access
+### On the node where you run the script
 
-**On all 3 target cluster nodes:**
-- Ubuntu 22.04+ or RHEL/CentOS 8+
-- SSH access (key-based or password)
-- `sudo` privileges
-- Internet access (for MySQL repository download)
+- Python 3.6+
+- `sudo` access
+- Internet access to `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat)
 
 The script automatically installs all missing components on the local node:
 
@@ -150,9 +21,16 @@ The script automatically installs all missing components on the local node:
 | `ansible` | subscription-manager repo (if enabled) or pip fallback |
 | `community.mysql` | ansible-galaxy |
 
+### On all 3 target cluster nodes
+
+- Ubuntu 22.04 / 24.04 **or** RHEL / CentOS 8+
+- SSH access (key-based or password)
+- `sudo` privileges
+- Internet access to `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat)
+
 ### Required Subscription-Manager Repositories (RedHat Only)
 
-If the master node runs RHEL, the following repositories must be enabled via `subscription-manager` before running the script.
+If the cluster nodes run RHEL, the following repositories must be enabled via `subscription-manager` before running the script.
 
 **RHEL 8:**
 
@@ -186,19 +64,246 @@ cd morpheus-innodb-cluster
 sudo python3 innodb_cluster_setup.py
 ```
 
-The script guides you through a 7-step interactive wizard:
+The script guides you through an 11-step interactive wizard:
 
-| Step | Phase | Description |
-|------|-------|-------------|
-| 1/7  | Environment Setup | Detects OS, installs prerequisites |
-| 2/7  | Cluster Configuration | Collects all cluster variables (5 sections) |
-| 3/7  | Inventory Generation | Creates Ansible inventory from inputs |
-| 4/7  | SSH Connectivity Test | Verifies all nodes are reachable |
-| 5/7  | Deployment Confirmation | Reviews configuration before execution |
-| 6/7  | Ansible Playbook Execution | Streams real-time output, logs to file |
-| 7/7  | Setup Report | Parses recap, generates summary report |
+| Step  | Phase | Description |
+|-------|-------|-------------|
+| 1/11  | Environment Setup | Detects OS, installs prerequisites |
+| 2/11  | Cluster Configuration | Collects all cluster variables (5 sections) |
+| 3/11  | Inventory Generation | Creates Ansible inventory from inputs |
+| 4/11  | SSH Connectivity Test | Verifies all nodes are reachable |
+| 5/11  | RHEL Repository Check | Verifies subscription-manager repos (RHEL only) |
+| 6/11  | Pre-existing MySQL Check | Detects existing MySQL packages on nodes |
+| 7/11  | Internet Connectivity | Tests TCP 443 to MySQL package repository |
+| 8/11  | MySQL Version Selection | OS-specific stream and version selection |
+| 9/11  | Deployment Confirmation | Reviews full configuration before execution |
+| 10/11 | Ansible Playbook Execution | Streams real-time output, logs to file |
+| 11/11 | Setup Report | Parses recap, generates summary report |
 
 **Typical duration:** 10–20 minutes depending on network speed.
+
+---
+
+## Supported Operating Systems
+
+| OS Family | Tested Distributions |
+|-----------|---------------------|
+| Debian    | Ubuntu 22.04 / 24.04 |
+| RedHat    | RHEL 8 / 9 |
+
+Playbooks automatically detect `ansible_os_family` and execute the appropriate tasks for each distribution.
+
+---
+
+## Screenshots
+
+### Step 1/11 — Environment Setup
+Detects the local OS family and automatically installs all required prerequisites (Ansible, sshpass, python3-pip, community.mysql collection).
+
+![Step 1 — Environment Setup](docs/screenshots/01-environment-setup.png)
+
+---
+
+### Step 2/11 — Cluster Configuration (Nodes & SSH)
+Interactive wizard collects hostnames and IP addresses for all 3 cluster nodes, then SSH credentials (key or password authentication, sudo escalation).
+
+![Step 2 — Cluster Nodes & SSH](docs/screenshots/02-cluster-configuration-nodes-ssh.png)
+
+---
+
+### Step 2/11 — Cluster Configuration (MySQL & System)
+Collects MySQL root and cluster admin credentials, cluster name, router user password, and NTP server settings.
+
+![Step 2 — MySQL Credentials & Settings](docs/screenshots/03-mysql-credentials-cluster-settings.png)
+
+---
+
+### Configuration Summary
+All collected parameters are presented in a structured summary table before saving. User confirms with `y` to proceed.
+
+![Configuration Summary](docs/screenshots/04-configuration-summary.png)
+
+---
+
+### Step 3 & 4/11 — Inventory Generation & SSH Connectivity Test
+Ansible inventory is auto-generated from collected inputs (IP-based, DNS-independent). SSH connectivity to all 3 nodes is validated before deployment.
+
+![Inventory Generation & SSH Test](docs/screenshots/05-inventory-ssh-test.png)
+
+---
+
+### Step 9 & 10/11 — Deployment Confirmation & Ansible Execution
+Final confirmation before Ansible runs. Playbook output streams in real-time with all task results visible.
+
+![Deployment & Ansible Output](docs/screenshots/06-deployment-confirmation-ansible-output.png)
+
+---
+
+### Step 11/11 — Play Recap & Setup Report
+Ansible PLAY RECAP parsed and presented as a structured node status table with success/failure counts.
+
+![Play Recap & Setup Report](docs/screenshots/07-play-recap-setup-report.png)
+
+---
+
+### Applied Roles, Next Steps & File Locations
+All applied roles listed with descriptions. Next steps for cluster management and MySQL Router bootstrap provided.
+
+![Applied Roles & Next Steps](docs/screenshots/08-applied-roles-next-steps.png)
+
+---
+
+## What's New
+
+### MySQL Version Selection (Ubuntu & RedHat)
+
+Both OS families now have an interactive MySQL version selection step (Step 8/11) before deployment.
+
+**Ubuntu / Debian — APT Stream Selection:**
+
+```
+  [Step 8/11] MYSQL VERSION SELECTION
+
+  Select MySQL version to install:
+    1. mysql-8.0  ← default
+    2. mysql-8.4-lts
+  Choice [1]:
+```
+
+The selection is pre-seeded into `debconf` via `mysql-apt-config` and applied during package installation. The selected version is also shown in the configuration summary:
+
+```
+│ MySQL APT Version            │ mysql-8.4-lts                       │
+```
+
+**RedHat / CentOS — AppStream Stream + Version Selection:**
+
+Version selection is a two-phase process:
+
+**Phase 1 — AppStream stream selection:**
+```
+  Select MySQL AppStream stream:
+    1. 8.0  ← default
+    2. 8.4
+  Choice [1]:
+```
+
+If stream `8.4` is selected, the script runs on the master node:
+```bash
+dnf module disable mysql -y
+dnf module enable mysql:8.4 -y
+```
+Stream `8.0` is the AppStream default — no module change is applied.
+
+**Phase 2 — Package version selection:**
+After the stream is activated, available versions are queried live from the repository:
+```
+  Available mysql-server versions (stream 8.4):
+
+  Select MySQL version to install:
+    1. 8.4.4
+    2. 8.4.6
+    3. 8.4.7  ← default
+  Choice [3]:
+```
+
+All selections are number-based — typing a version string directly is not accepted.
+
+---
+
+### OS-Aware Internet Connectivity Check
+
+Step 7 now detects the OS on the master node and checks the correct MySQL package repository for each OS family:
+
+| OS Family | Host Checked | Port |
+|-----------|-------------|------|
+| Ubuntu / Debian | `repo.mysql.com` | 443 |
+| RedHat / CentOS | `dev.mysql.com` | 443 |
+
+The check uses `bash -c "(echo > /dev/tcp/...)"`  — no `curl` or `wget` dependency required. Explicitly invokes `bash` (not `sh`) to ensure `/dev/tcp` support on Ubuntu where `/bin/sh` is `dash`.
+
+---
+
+### APT Pinning for Ubuntu (repo.mysql.com Priority)
+
+After adding the MySQL APT repository, an APT preferences file is deployed to ensure all MySQL packages are installed from `repo.mysql.com` rather than the Ubuntu default repositories:
+
+```
+/etc/apt/preferences.d/mysql
+  Pin: origin repo.mysql.com
+  Pin-Priority: 1001
+```
+
+Priority `1001` overrides the Ubuntu default (`500`) and ensures the MySQL official repository is always preferred, even for downgrades.
+
+---
+
+### Stream-Aware mysql-shell Installation (RedHat)
+
+`mysql-shell` is sourced from the MySQL Community Tools repository matching the selected stream:
+
+| Stream | Repository Enabled |
+|--------|-------------------|
+| `8.0`  | `mysql-tools-community` |
+| `8.4`  | `mysql-tools-8.4-lts-community` |
+
+After the correct repository is enabled, the installed `mysql-server` version is queried via `rpm` and the exact matching `mysql-shell-<version>` package is installed — ensuring full compatibility between server and shell.
+
+---
+
+## Directory Structure
+
+```
+morpheus-innodb-cluster/
+├── innodb_cluster_setup.py            # Main orchestrator script
+├── README.md
+│
+├── playbooks/
+│   ├── mysql-innodb.yml               # Main Ansible playbook entry point
+│   │
+│   ├── 01-os-preconfigure/            # Role: OS hardening & kernel tuning
+│   │   ├── defaults/main.yml
+│   │   ├── vars/main.yml              # sysctl parameters
+│   │   ├── tasks/
+│   │   │   ├── main.yml              # OS-family dispatcher
+│   │   │   ├── debian.yml            # Ubuntu/Debian tasks
+│   │   │   └── redhat.yml            # RHEL/CentOS/Rocky/Alma tasks
+│   │   ├── handlers/main.yml
+│   │   ├── files/issue.net           # SSH login banner text
+│   │   └── meta/main.yml
+│   │
+│   ├── 02-mysql-install/              # Role: MySQL installation (8.0 or 8.4)
+│   │   ├── defaults/main.yml
+│   │   ├── vars/main.yml
+│   │   ├── tasks/
+│   │   │   ├── main.yml              # OS-family dispatcher
+│   │   │   ├── debian.yml            # apt-based install + APT pinning + systemd drop-in
+│   │   │   └── redhat.yml            # dnf/yum-based install + stream management + systemd drop-in
+│   │   ├── handlers/main.yml
+│   │   └── meta/main.yml
+│   │
+│   ├── 03-mysql-innodb-cluster/       # Role: InnoDB Cluster pre-configuration
+│   │   ├── defaults/main.yml
+│   │   ├── vars/main.yml
+│   │   ├── tasks/main.yml
+│   │   ├── handlers/main.yml
+│   │   └── meta/main.yml
+│   │
+│   ├── 04-mysql-create-innodb-cluster/ # Role: Cluster creation (master node only)
+│   │   ├── defaults/main.yml
+│   │   ├── vars/main.yml
+│   │   ├── tasks/main.yml
+│   │   ├── handlers/main.yml
+│   │   └── meta/main.yml
+│   │
+│   # Generated at runtime:
+│   └── inventory.ini
+│
+# Generated at runtime:
+├── cluster_config.json                # Saved user configuration (reused on re-runs)
+├── cluster_setup.log                  # Full Ansible output log
+└── cluster_setup_report.txt          # Post-deployment summary report
+```
 
 ---
 
@@ -271,7 +376,7 @@ Applied to all nodes. Hardens the OS and tunes kernel parameters for database wo
 | NTP | `systemd-timesyncd` | `chrony` |
 | Package locks | Stop `unattended-upgrades`, clear apt/dpkg locks | — |
 | MySQL limits | `/etc/security/limits.d/99-mysql.conf` | `/etc/security/limits.d/99-mysql.conf` |
-| Transparent Huge Pages | Disabled (enabled + defrag) | Disabled |
+| Transparent Huge Pages | Disabled | Disabled |
 | Kernel parameters | `/etc/sysctl.d/99-01-os-preconfigure.conf` | `/etc/sysctl.d/99-01-os-preconfigure.conf` |
 | GRUB | `transparent_hugepage=never` appended | `transparent_hugepage=never` appended |
 
@@ -300,17 +405,19 @@ mysql hard memlock unlimited
 
 ---
 
-### Role 02 — MySQL 8.0 Installation
+### Role 02 — MySQL Installation
 
-Applied to all nodes. Installs MySQL 8.0 from the official MySQL repository.
+Applied to all nodes. Installs MySQL from the official MySQL repository. The version is selected interactively in Step 8 before deployment.
 
 | Task | Debian/Ubuntu | RedHat/CentOS |
 |------|--------------|---------------|
-| Repository | `mysql-apt-config` deb from `repo.mysql.com` | MySQL YUM repo RPM (EL8/EL9 auto-detected) |
-| Packages | mysql-server, mysql-client, mysql-shell, python3-mysqldb, libmysqlclient-dev, numactl | mysql-server, mysql, mysql-shell, python3-PyMySQL, mysql-devel, numactl |
-| Version lock | `dpkg_selections` hold | `yum-plugin-versionlock` or `python3-dnf-plugin-versionlock` |
+| Repository | `mysql-apt-config` deb from `repo.mysql.com` | MySQL Community Release RPM (EL8/EL9 auto-detected) |
+| APT Pinning | `repo.mysql.com` pinned at priority 1001 | — |
+| Stream | Selected via `mysql-apt-config` debconf pre-seed | `dnf module enable mysql:<stream>` |
+| Packages | mysql-server, mysql-client, mysql-shell, python3-mysqldb, libmysqlclient-dev, numactl | mysql-server, mysql, python3-PyMySQL, numactl |
+| mysql-shell | Included in APT packages | From `mysql-tools-community` (8.0) or `mysql-tools-8.4-lts-community` (8.4) |
+| Version lock | `dpkg_selections` hold | `yum-plugin-versionlock` / `python3-dnf-plugin-versionlock` |
 | Service name | `mysql` | `mysqld` |
-| CRB repo | — | Enabled automatically (Rocky/Alma detection) |
 
 **systemd drop-in applied to MySQL service (both OS families):**
 ```ini
@@ -396,6 +503,7 @@ sudo python3 innodb_cluster_setup.py
 | Concern | Behavior |
 |---------|----------|
 | Configuration | Loads `cluster_config.json` automatically; offers to reuse |
+| MySQL version | Previously selected version shown in summary; option to change |
 | MySQL root password | Tries socket auth first, then existing password |
 | Router account | Uses `{update: true}` if `routeruser` already exists |
 | Packages | Checks current state before installing |
@@ -471,6 +579,9 @@ Ensure these ports are open **between all cluster nodes** (bidirectional):
 | Cluster creation fails with "already exists" | Run `dba.dropMetadataSchema()` in MySQL Shell then retry |
 | SSH connectivity test fails | Check firewall rules; script allows override to continue anyway |
 | `community.mysql` not found | Script installs it automatically via `ansible-galaxy` |
+| Internet connectivity check fails | Verify `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat) is reachable on port 443 |
+| mysql-shell version mismatch (RedHat) | Ensure the correct tools repo is enabled: `mysql-tools-community` (8.0) or `mysql-tools-8.4-lts-community` (8.4) |
+| AppStream module conflict (RedHat) | Script runs `dnf module disable mysql` before enabling the selected stream automatically |
 
 ---
 
