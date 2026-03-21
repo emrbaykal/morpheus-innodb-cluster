@@ -16,12 +16,6 @@
   when: crb_status.rc != 0
 
 
-- name: Enable MySQL AppStream module stream
-  command: dnf module enable mysql:{{ mysql_version }} -y
-  when:
-    - mysql_version is defined
-    - mysql_version != ""
-
 
 - name: Set MySQL package names based on selected version
   set_fact:
