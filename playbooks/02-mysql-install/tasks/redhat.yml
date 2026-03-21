@@ -37,8 +37,13 @@
   shell: dnf config-manager --disable 'mysql*'
   changed_when: false
 
-- name: Enable mysql-tools-community repository only
+- name: Enable mysql-tools-community repository (stream 8.0)
   command: dnf config-manager --enable mysql-tools-community
+  when: mysql_version == '8.0'
+
+- name: Enable mysql-tools-8.4-lts-community repository (stream 8.4)
+  command: dnf config-manager --enable mysql-tools-8.4-lts-community
+  when: mysql_version == '8.4'
 
 - name: Get installed mysql-server version
   shell: >
