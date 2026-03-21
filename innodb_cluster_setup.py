@@ -219,23 +219,23 @@ def prompt_yes_no(label, default_yes=True):
 
 def prompt_choice(label, choices, default=None):
     """Present a numbered list of choices and return the selected value."""
+    default_idx = choices.index(default) + 1 if default in choices else None
     print_hint(f"{label}:")
     for i, choice in enumerate(choices, 1):
         marker = "  ← default" if choice == default else ""
         print_hint(f"  {i}. {choice}{marker}")
     while True:
-        raw = input(f"    {Colors.BOLD}Choice [{default}]:{Colors.END} ").strip()
+        suffix = f"{default_idx}" if default_idx else ""
+        raw = input(f"    {Colors.BOLD}Choice [{suffix}]:{Colors.END} ").strip()
         if not raw and default:
             return default
-        if raw in choices:
-            return raw
         try:
             idx = int(raw) - 1
             if 0 <= idx < len(choices):
                 return choices[idx]
         except ValueError:
             pass
-        print_error(f"Please enter a number (1-{len(choices)}) or one of: {', '.join(choices)}")
+        print_error(f"Please enter a number between 1 and {len(choices)}.")
 
 
 def run_command(cmd, capture=False, check=True, env=None):
