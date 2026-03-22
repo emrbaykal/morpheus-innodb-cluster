@@ -55,6 +55,12 @@ Used for log aggregation, stats, metrics, and temporal data. OpenSearch is a clu
 
 An AMQP-based tier with STOMP protocol for agent communication. RabbitMQ needs at least 3 instances for HA configurations due to quorum-based elections in failover scenarios. While RabbitMQ is installed automatically during Morpheus setup, it **does require manual clustering** afterward — a multi-step process involving secret synchronization, erlang cookie distribution, and node-by-node join operations.
 
+### The Architecture
+
+The recommended 3-Node HA deployment looks like this: three Morpheus application nodes sit behind a load balancer, each running embedded RabbitMQ and OpenSearch. On the side, a **separate 3-node MySQL Database Cluster** provides the transactional database tier, connected via port 3306. Shared storage connects to all application nodes.
+
+![HPE Morpheus Enterprise 3-Node HA Architecture with Distributed Database](screenshots-blog/ha-dev.png)
+
 ---
 
 ## MySQL Requirements for Morpheus HA
