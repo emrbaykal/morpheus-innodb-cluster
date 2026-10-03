@@ -1,6 +1,6 @@
 ---
 # MySQL Server comes from Red Hat AppStream (supported by Red Hat).
-# Where the series is a module stream (8.4 on RHEL 9, both on RHEL 8) the
+# Where the series is a module stream (8.4 on RHEL 9) the
 # stream is enabled; otherwise the module is reset so the plain packages show.
 - name: Select the MySQL {{ mysql_version }} AppStream stream
   shell: |
