@@ -1,5 +1,11 @@
 ---
-# OS-dependent variables
-mysql_service_name: "{{ 'mysql' if ansible_os_family == 'Debian' else 'mysqld' }}"
-mysql_socket_path: "{{ '/var/run/mysqld/mysqld.sock' if ansible_os_family == 'Debian' else '/var/lib/mysql/mysql.sock' }}"
-mysql_conf_dir: "{{ '/etc/mysql/conf.d' if ansible_os_family == 'Debian' else '/etc/my.cnf.d' }}"
+# Ubuntu: the MySQL Server package set, in the names used in the repository pool.
+mysql_server_packages:
+  - mysql-common
+  - mysql-community-client-plugins
+  - mysql-community-client-core
+  - mysql-community-client
+  - mysql-client
+  - mysql-community-server-core
+  - mysql-community-server
+  - mysql-server

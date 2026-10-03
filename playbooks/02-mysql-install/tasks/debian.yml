@@ -1,139 +1,51 @@
 ---
+# Oracle's APT index only carries the newest build of a series, so the chosen
+# version is downloaded from the repository pool and installed as local files.
+- name: Install numactl
+  apt:
+    name: numactl
+    update_cache: true
+    lock_timeout: 300
 
-- name: Download mysql-apt-config package from MySQL repo
-  get_url:
-    url: https://repo.mysql.com/mysql-apt-config_0.8.36-1_all.deb
-    dest: /tmp/mysql-apt-config_0.8.36-1_all.deb
-    mode: '0644'
-
-- name: Pre-seed mysql-apt-config to select MySQL version
-  shell: |
-    echo "mysql-apt-config mysql-apt-config/select-server select {{ mysql_apt_version }}" | debconf-set-selections
+- name: Check the installed MySQL version
+  command: dpkg-query -W -f=${Version} mysql-community-server
+  register: installed_mysql
   changed_when: false
+  failed_when: false
 
-- name: Install mysql-apt-config package
-  apt:
-    deb: /tmp/mysql-apt-config_0.8.36-1_all.deb
-    state: present
-  environment:
-    DEBIAN_FRONTEND: noninteractive
+- name: Download and install MySQL {{ mysql_version_full }}
+  when: not installed_mysql.stdout.startswith(mysql_version_full + '-')
+  vars:
+    pool: "https://repo.mysql.com/apt/ubuntu/pool/{{ 'mysql-8.0' if mysql_version == '8.0' else 'mysql-8.4-lts' }}/m"
+    suffix: "-1ubuntu{{ ansible_distribution_version }}_amd64.deb"
+    download_dir: /var/tmp/mysql-{{ mysql_version_full }}
+  block:
+    - name: Create the download directory
+      file:
+        path: "{{ download_dir }}"
+        state: directory
+        mode: "0755"
 
-- name: Update apt cache
-  apt:
-    update_cache: yes
+    - name: Download the MySQL Server packages
+      get_url:
+        url: "{{ pool }}/mysql-community/{{ item }}_{{ mysql_version_full }}{{ suffix }}"
+        dest: "{{ download_dir }}/"
+        mode: "0644"
+      loop: "{{ mysql_server_packages }}"
 
-- name: Pin MySQL packages to repo.mysql.com
-  copy:
-    dest: /etc/apt/preferences.d/mysql
-    content: |
-      Package: mysql-server mysql-client mysql-shell libmysqlclient-dev mysql-community-server mysql-community-client
-      Pin: origin repo.mysql.com
-      Pin-Priority: 1001
-    owner: root
-    group: root
-    mode: '0644'
+    - name: Download MySQL Shell {{ mysql_shell_version }}
+      get_url:
+        url: "{{ pool }}/mysql-shell/mysql-shell_{{ mysql_shell_version }}{{ suffix }}"
+        dest: "{{ download_dir }}/"
+        mode: "0644"
 
-- name: Install MySQL packages (Debian)
-  apt:
-    name:
-      - mysql-server
-      - mysql-client
-      - mysql-shell
-      - python3-mysqldb
-      - libmysqlclient-dev
-      - numactl
-    state: present
+    - name: Install the downloaded packages
+      shell: apt-get install -y -o DPkg::Lock::Timeout=300 {{ download_dir }}/*.deb
+      environment:
+        DEBIAN_FRONTEND: noninteractive
 
-- name: List installed MySQL packages
-  shell: apt list --installed 2>/dev/null | grep mysql
-  register: mysql_packages_installed
-  changed_when: false
-
-- name: Display installed MySQL packages
-  debug:
-    var: mysql_packages_installed.stdout_lines
-
-
-- name: Hold MySQL server package version
+- name: Hold the MySQL packages
   dpkg_selections:
-    name: mysql-server
+    name: "{{ item }}"
     selection: hold
-
-- name: Verify held packages
-  shell: apt-mark showhold
-  register: held_packages
-  changed_when: false
-
-- name: Display held packages
-  debug:
-    var: held_packages.stdout_lines
-
-- name: Ensure mysql systemd override directory exists
-  file:
-    path: /etc/systemd/system/mysql.service.d
-    state: directory
-    owner: root
-    group: root
-    mode: '0755'
-
-- name: Deploy mysql systemd resource limits drop-in
-  copy:
-    dest: /etc/systemd/system/mysql.service.d/limits.conf
-    content: |
-      [Service]
-      LimitNOFILE=65535
-      LimitNPROC=65535
-      LimitMEMLOCK=infinity
-      ExecStart=
-      ExecStart=/usr/bin/numactl --interleave=all /usr/sbin/mysqld
-    owner: root
-    group: root
-    mode: '0644'
-  notify: systemd daemon-reload
-
-- name: Flush handlers
-  meta: flush_handlers
-
-
-- name: Ensure MySQL service is started and enabled
-  systemd:
-    name: "{{ mysql_service_name }}"
-    state: started
-    enabled: yes
-
-- name: Check MySQL service status
-  command: "systemctl status {{ mysql_service_name }}"
-  register: mysql_service_status
-  changed_when: false
-
-- name: Display MySQL service status
-  debug:
-    var: mysql_service_status.stdout_lines
-
-
-- name: Check if MySQL root can connect without password (socket/empty auth)
-  command: mysql -u root -e "SELECT 1"
-  register: mysql_root_nopass
-  changed_when: false
-  ignore_errors: true
-  no_log: true
-
-- name: Set root user password (first run - socket auth)
-  command: >
-    mysql -u root -e
-    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
-  when: mysql_root_nopass.rc == 0
-  no_log: true
-
-- name: Set root user password (subsequent run - existing password)
-  community.mysql.mysql_user:
-    name: root
-    password: "{{ mysql_root_password }}"
-    login_unix_socket: "{{ mysql_socket_path }}"
-    host: localhost
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-    state: present
-    update_password: always
-  when: mysql_root_nopass.rc != 0
-  no_log: true
+  loop: "{{ mysql_server_packages + ['mysql-shell'] }}"

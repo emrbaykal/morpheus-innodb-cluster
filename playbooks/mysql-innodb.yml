@@ -1,48 +1,50 @@
 ---
-- hosts: all
-  gather_facts: true
+- hosts: mysql_nodes
   become: true
   vars:
     ansible_python_interpreter: /usr/bin/python3
-    # ansible_user and ansible_ssh_private_key_file are now provided via inventory
+    mysql_service: "{{ 'mysql' if ansible_os_family == 'Debian' else 'mysqld' }}"
+    mysqld_binary: "{{ '/usr/sbin/mysqld' if ansible_os_family == 'Debian' else '/usr/libexec/mysqld' }}"
+    mysql_conf_dir: "{{ '/etc/mysql/mysql.conf.d' if ansible_os_family == 'Debian' else '/etc/my.cnf.d' }}"
 
   pre_tasks:
-    - name: Populate /etc/hosts with cluster node entries
+    # Cloud images often map the node's own name to 127.0.0.1 / 127.0.1.1.
+    # InnoDB Cluster refuses a hostname that resolves to loopback.
+    - name: Remove the node's own name from loopback lines in /etc/hosts
+      shell: |
+        awk -v h="{{ node_hostname }}" '
+          /^127\./ {
+            line = $1
+            for (i = 2; i <= NF; i++) if ($i != h && index($i, h ".") != 1) line = line " " $i
+            if (line == $1) next
+            $0 = line
+          }
+          { print }' /etc/hosts > /etc/hosts.new
+        if cmp -s /etc/hosts /etc/hosts.new; then rm /etc/hosts.new; else cat /etc/hosts.new > /etc/hosts; rm /etc/hosts.new; echo changed; fi
+      register: loopback
+      changed_when: "'changed' in loopback.stdout"
+      tags: os
+
+    - name: Add the cluster nodes to /etc/hosts
       lineinfile:
         path: /etc/hosts
-        regexp: ".*{{ item.hostname }}$"
+        regexp: '\s{{ item.hostname }}$'
         line: "{{ item.ip }}  {{ item.hostname }}"
-        state: present
-      loop: "{{ cluster_hosts_entries }}"
-      tags:
-        - role::os-preconfigure
-        - role::os-preconfigure::etc-hosts
+      loop: "{{ cluster_hosts }}"
+      tags: os
 
-    - name: Set hostname on each node
+    - name: Set the hostname
       hostname:
         name: "{{ node_hostname }}"
-      tags:
-        - role::os-preconfigure
-        - role::os-preconfigure::set-hostname
+      tags: os
 
   roles:
-       - role: 01-os-preconfigure
-         tags:
-           - role::os-preconfigure
-
-       - role: 02-mysql-install
-         tags:
-           - role::mysql::install-mysql
-
-       - role: 03-mysql-innodb-cluster
-         tags:
-           - role::mysql::inodb-cluster
-           - role::mysql::innodb-cluster::pre-configure
-
-       - role: 04-mysql-create-innodb-cluster
-         when: inventory_hostname == master_hostname
-         tags:
-           - role::mysql::inodb-cluster
-           - role::mysql::innodb-cluster::post-configure
-
-        
+    - role: 01-os-preconfigure
+      tags: os
+    - role: 02-mysql-install
+      tags: install
+    - role: 03-mysql-innodb-cluster
+      tags: configure
+    - role: 04-mysql-create-innodb-cluster
+      when: inventory_hostname == master_ip
+      tags: cluster

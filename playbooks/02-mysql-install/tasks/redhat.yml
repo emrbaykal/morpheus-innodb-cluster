@@ -1,179 +1,45 @@
 ---
+# MySQL Server comes from Red Hat AppStream (supported by Red Hat).
+# Where the series is a module stream (8.4 on RHEL 9, both on RHEL 8) the
+# stream is enabled; otherwise the module is reset so the plain packages show.
+- name: Select the MySQL {{ mysql_version }} AppStream stream
+  shell: |
+    streams=$(dnf -q module list mysql 2>/dev/null | awk '$1 == "mysql" {print $2}')
+    enabled=$(dnf -q module list --enabled mysql 2>/dev/null | awk '$1 == "mysql" {print $2}')
+    if echo "$streams" | grep -qx '{{ mysql_version }}'; then
+      [ "$enabled" = '{{ mysql_version }}' ] && exit 0
+      dnf -y module reset mysql && dnf -y module enable mysql:{{ mysql_version }} && echo changed
+    elif [ -n "$enabled" ]; then
+      dnf -y module reset mysql && echo changed
+    fi
+  register: mysql_stream
+  changed_when: "'changed' in mysql_stream.stdout"
 
-- name: Set MySQL package names based on selected version
-  set_fact:
-    _mysql_server_pkg: "{{ 'mysql-server-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql-server' }}"
-    _mysql_client_pkg: "{{ 'mysql-' + mysql_version_full if (mysql_version_full is defined and mysql_version_full != '') else 'mysql' }}"
-
-- name: Disable default MySQL AppStream module
-  shell: dnf module disable mysql -y
-  register: _dnf_module_disable
-  changed_when: false
-  failed_when: false
-  when: mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
-
-- name: Log AppStream module disable result
-  debug:
-    msg: "{{ _dnf_module_disable.stdout_lines | default([]) + _dnf_module_disable.stderr_lines | default([]) }}"
-  when:
-    - mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
-    - _dnf_module_disable.rc | default(0) != 0
-
-- name: Enable selected MySQL AppStream stream
-  shell: "dnf module enable mysql:{{ mysql_version }} -y"
-  register: _dnf_module_enable
-  changed_when: false
-  failed_when: false
-  when: mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
-
-- name: Log AppStream module enable result
-  debug:
-    msg: "{{ _dnf_module_enable.stdout_lines | default([]) + _dnf_module_enable.stderr_lines | default([]) }}"
-  when:
-    - mysql_version is defined and mysql_version != '' and mysql_version != '8.0'
-    - _dnf_module_enable.rc | default(0) != 0
-
-- name: Install MySQL packages (RedHat)
-  package:
+- name: Install MySQL {{ mysql_version_full }}
+  dnf:
     name:
-      - "{{ _mysql_server_pkg }}"
-      - "{{ _mysql_client_pkg }}"
-      - python3-PyMySQL
+      - mysql-server-{{ mysql_version_full }}
+      - mysql-{{ mysql_version_full }}
+      - python3-dnf-plugin-versionlock
       - numactl
-    state: present
 
-- name: Set MySQL community release RPM URL based on EL version
-  set_fact:
-    mysql_community_release_rpm: "{{ 'https://dev.mysql.com/get/mysql84-community-release-el8-2.noarch.rpm' if ansible_distribution_major_version | int == 8 else 'https://dev.mysql.com/get/mysql84-community-release-el9-3.noarch.rpm' }}"
+# MySQL Shell is not in AppStream; it comes from Oracle's tools repository.
+- name: Add the MySQL Shell repository
+  yum_repository:
+    name: mysql-tools
+    description: MySQL Shell {{ mysql_version }}
+    baseurl: "https://repo.mysql.com/yum/{{ 'mysql-tools-community' if mysql_version == '8.0' else 'mysql-tools-8.4-community' }}/el/$releasever/$basearch/"
+    gpgkey:
+      - https://repo.mysql.com/RPM-GPG-KEY-mysql-2025
+      - https://repo.mysql.com/RPM-GPG-KEY-mysql-2023
 
-- name: Install MySQL community release RPM (adds repo definitions)
-  shell: "dnf install -y --nogpgcheck {{ mysql_community_release_rpm }}"
-  register: _mysql_repo_result
-  changed_when: "'Nothing to do' not in _mysql_repo_result.stdout"
+- name: Install MySQL Shell
+  dnf:
+    name: mysql-shell
 
-- name: Disable all MySQL community repositories
-  shell: dnf config-manager --disable 'mysql*'
-  changed_when: false
-
-- name: Enable mysql-tools-community repository (stream 8.0)
-  command: dnf config-manager --enable mysql-tools-community
-  when: mysql_version == '8.0'
-
-- name: Enable mysql-tools-8.4-lts-community repository (stream 8.4)
-  command: dnf config-manager --enable mysql-tools-8.4-lts-community
-  when: mysql_version == '8.4'
-
-- name: Get installed mysql-server version
+- name: Lock the MySQL package versions
   shell: >
-    rpm -q --queryformat "%{VERSION}" mysql-server 2>/dev/null ||
-    rpm -q --queryformat "%{VERSION}" mysql-community-server 2>/dev/null
-  register: _mysql_installed_ver
-  changed_when: false
-  failed_when: _mysql_installed_ver.stdout == ""
-
-- name: Install mysql-shell matching installed MySQL server version
-  yum:
-    name: "mysql-shell-{{ _mysql_installed_ver.stdout }}"
-    state: present
-    disable_gpg_check: yes
-
-
-- name: List installed MySQL packages
-  shell: rpm -qa | grep -i mysql
-  register: mysql_packages_installed
-  changed_when: false
-
-- name: Display installed MySQL packages
-  debug:
-    var: mysql_packages_installed.stdout_lines
-
-
-- name: Install yum-plugin-versionlock
-  package:
-    name: "{{ 'yum-plugin-versionlock' if ansible_distribution_major_version | int <= 7 else 'python3-dnf-plugin-versionlock' }}"
-    state: present
-
-- name: Hold MySQL server package version
-  shell: >
-    {{ 'yum' if ansible_distribution_major_version | int <= 7 else 'dnf' }}
-    versionlock add mysql-server
-  changed_when: false
-
-- name: Verify held packages
-  shell: "{{ 'yum versionlock list' if ansible_distribution_major_version | int <= 7 else 'dnf versionlock list' }}"
-  register: held_packages
-  changed_when: false
-
-- name: Display held packages
-  debug:
-    var: held_packages.stdout_lines
-
-- name: Ensure mysqld systemd override directory exists
-  file:
-    path: /etc/systemd/system/mysqld.service.d
-    state: directory
-    owner: root
-    group: root
-    mode: '0755'
-
-- name: Deploy mysqld systemd resource limits drop-in
-  copy:
-    dest: /etc/systemd/system/mysqld.service.d/limits.conf
-    content: |
-      [Service]
-      LimitNOFILE=65535
-      LimitNPROC=65535
-      LimitMEMLOCK=infinity
-      ExecStart=
-      ExecStart=/usr/bin/numactl --interleave=all /usr/libexec/mysqld
-    owner: root
-    group: root
-    mode: '0644'
-  notify: systemd daemon-reload
-
-- name: Flush handlers
-  meta: flush_handlers
-
-
-- name: Ensure MySQL service is started and enabled
-  systemd:
-    name: "{{ mysql_service_name }}"
-    state: started
-    enabled: yes
-
-- name: Check MySQL service status
-  command: "systemctl status {{ mysql_service_name }}"
-  register: mysql_service_status
-  changed_when: false
-
-- name: Display MySQL service status
-  debug:
-    var: mysql_service_status.stdout_lines
-
-
-- name: Check if MySQL root can connect without password (socket/empty auth)
-  command: mysql -u root -e "SELECT 1"
-  register: mysql_root_nopass
-  changed_when: false
-  ignore_errors: true
-  no_log: true
-
-- name: Set root user password (first run - socket auth)
-  command: >
-    mysql -u root -e
-    "ALTER USER 'root'@'localhost' IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'; FLUSH PRIVILEGES;"
-  when: mysql_root_nopass.rc == 0
-  no_log: true
-
-- name: Set root user password (subsequent run - existing password)
-  community.mysql.mysql_user:
-    name: root
-    password: "{{ mysql_root_password }}"
-    login_unix_socket: "{{ mysql_socket_path }}"
-    host: localhost
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-    state: present
-    update_password: always
-  when: mysql_root_nopass.rc != 0
-  no_log: true
+    dnf versionlock list | grep -q '^mysql-server-' ||
+    { dnf versionlock add mysql-server mysql mysql-shell && echo changed; }
+  register: versionlock
+  changed_when: "'changed' in versionlock.stdout"

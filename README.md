@@ -1,62 +1,27 @@
 # MySQL InnoDB Cluster — Morpheus Setup
 
-Automated deployment of a 3-node MySQL InnoDB Cluster on Ubuntu and RedHat-based systems, orchestrated by a single interactive Python script backed by modular Ansible roles.
+Builds a 3-node MySQL InnoDB Cluster on Ubuntu or RHEL with one interactive Python script and four Ansible roles.
 
----
+## Supported systems
 
-## Prerequisites
+| OS | MySQL Server source | MySQL Shell source |
+|----|---------------------|--------------------|
+| RHEL 8 / 9 | Red Hat AppStream (supported by Red Hat) | repo.mysql.com tools repository |
+| Ubuntu 22.04 / 24.04 | repo.mysql.com (APT pool) | repo.mysql.com (APT pool) |
 
-### On the node where you run the script
+## Requirements
 
-- Python 3.6+
-- `sudo` access
-- Internet access to `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat)
+On all three nodes:
 
-The script automatically installs all missing components on the local node:
+- SSH access with a key or a password, and `sudo` (or `dzdo`)
+- HTTPS access to `repo.mysql.com`
+- RHEL only: `rhel-<8|9>-for-x86_64-baseos-rpms` and `rhel-<8|9>-for-x86_64-appstream-rpms` enabled
 
-| Component | Method |
-|-----------|--------|
-| `sshpass` | OS package manager |
-| `python3-pip` | OS package manager |
-| `ansible` | subscription-manager repo (if enabled) or pip fallback |
-| `community.mysql` | ansible-galaxy |
+On the master node the script installs Ansible (`ansible` on Ubuntu, `ansible-core` on RHEL) and `sshpass` if they are missing. No Ansible Galaxy collections are needed.
 
-### On all 3 target cluster nodes
+## Quick start
 
-- Ubuntu 22.04 / 24.04 **or** RHEL 8 / 9
-- SSH access (key-based or password)
-- `sudo` privileges
-- Internet access to `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat)
-
-### Required Subscription-Manager Repositories (RedHat Only)
-
-If the cluster nodes run RHEL, the following repositories must be enabled via `subscription-manager` before running the script.
-
-**RHEL 8:**
-
-```bash
-subscription-manager repos --enable=rhel-8-for-x86_64-baseos-rpms
-subscription-manager repos --enable=rhel-8-for-x86_64-appstream-rpms
-subscription-manager repos --enable=codeready-builder-for-rhel-8-x86_64-rpms
-subscription-manager repos --enable=ansible-2.9-for-rhel-8-x86_64-rpms
-```
-
-**RHEL 9:**
-
-```bash
-subscription-manager repos --enable=rhel-9-for-x86_64-baseos-rpms
-subscription-manager repos --enable=rhel-9-for-x86_64-appstream-rpms
-subscription-manager repos --enable=codeready-builder-for-rhel-9-x86_64-rpms
-subscription-manager repos --enable=ansible-automation-platform-2.4-for-rhel-9-x86_64-rpms
-```
-
-> If the Ansible repository is not enabled, the script will warn and automatically fall back to installing Ansible via `pip3`.
-
----
-
-## Quick Start
-
-> Run the following commands only on the server designated as the **master node** of the MySQL InnoDB Cluster.
+Run on the node that will be the cluster primary:
 
 ```bash
 git clone https://github.com/emrbaykal/morpheus-innodb-cluster.git
@@ -64,428 +29,96 @@ cd morpheus-innodb-cluster
 sudo python3 innodb_cluster_setup.py
 ```
 
-The script guides you through an 11-step interactive wizard:
+| Step | What happens |
+|------|--------------|
+| 1. Environment | Installs Ansible and sshpass when missing |
+| 2. Cluster configuration | Asks for nodes, SSH, MySQL passwords, cluster name and NTP; saves `cluster_config.json` |
+| 3. Inventory and SSH test | Writes `playbooks/inventory.ini` and pings every node |
+| 4. MySQL version | Pick 8.0 or 8.4, then pick the exact version from the list the repository offers today |
+| 5. Deployment | Runs `playbooks/mysql-innodb.yml` and logs to `cluster_setup.log` |
+| 6. Report | Writes `cluster_setup_report.txt` |
 
-| Step  | Phase | Description |
-|-------|-------|-------------|
-| 1/11  | Environment Setup | Detects OS, installs prerequisites |
-| 2/11  | Cluster Configuration | Collects all cluster variables (5 sections) |
-| 3/11  | Inventory Generation | Creates Ansible inventory from inputs |
-| 4/11  | SSH Connectivity Test | Verifies all nodes are reachable |
-| 5/11  | RHEL Repository Check | Verifies subscription-manager repos (RHEL only) |
-| 6/11  | Pre-existing MySQL Check | Detects existing MySQL packages on nodes |
-| 7/11  | Internet Connectivity | Tests TCP 443 to MySQL package repository |
-| 8/11  | MySQL Version Selection | OS-specific stream and version selection |
-| 9/11  | Deployment Confirmation | Reviews full configuration before execution |
-| 10/11 | Ansible Playbook Execution | Streams real-time output, logs to file |
-| 11/11 | Setup Report | Parses recap, generates summary report |
+On a re-run the saved answers are offered again. Choosing "n" walks through the questions with the old values as defaults; Enter keeps a value, and a password prompt left empty keeps the saved password.
 
-**Typical duration:** 10–20 minutes depending on network speed.
+## How the version list is built
 
----
+**RHEL.** The list is every `mysql-server` build in AppStream for the chosen series (`dnf repoquery --disable-modular-filtering`). During the install the playbook enables the `mysql:<series>` module stream when the series is a stream (8.4 on RHEL 9, both series on RHEL 8), otherwise it resets the module so the plain packages are used. MySQL Shell is the newest build of the same series from Oracle's tools repository, because AppStream does not ship it and Oracle's Shell builds do not follow every AppStream release.
 
-## Supported Operating Systems
+**Ubuntu.** Oracle's APT index only lists the newest build of a series, but older builds stay in the repository pool. The script reads the newest version from the index and checks the pool for every patch release below it. The chosen version and the newest MySQL Shell of the series are downloaded from the pool and installed as local packages.
 
-| OS Family | Tested Distributions |
-|-----------|---------------------|
-| Debian    | Ubuntu 22.04 / 24.04 |
-| RedHat    | RHEL 8 / 9 |
+All MySQL packages are then held (`dnf versionlock` / `apt-mark hold`), so an OS update does not move the version.
 
-Playbooks automatically detect `ansible_os_family` and execute the appropriate tasks for each distribution.
+## What the playbook does
 
----
+**Pre-tasks (all nodes)** — removes the node's own name from `127.x` lines in `/etc/hosts` (InnoDB Cluster refuses a hostname that resolves to loopback), adds all three nodes to `/etc/hosts`, sets the hostname.
 
-## Screenshots
+**01-os-preconfigure (all nodes)**
 
-### Step 1/11 — Environment Setup
-Detects the local OS family and automatically installs all required prerequisites (Ansible, sshpass, python3-pip, community.mysql collection).
+- SSH login banner from `files/issue.net`
+- RHEL: SELinux permissive, firewalld stopped. Ubuntu: ufw, AppArmor and unattended-upgrades stopped
+- `en_US.UTF-8` locale; NTP through chrony (RHEL) or systemd-timesyncd (Ubuntu)
+- `/etc/security/limits.d/99-mysql.conf`, kernel parameters from `vars/main.yml` in `/etc/sysctl.d/99-01-os-preconfigure.conf`
+- Transparent Huge Pages off now and at boot
 
-![Step 1 — Environment Setup](docs/screenshots/01-environment-setup.png)
+**02-mysql-install (all nodes)** — installs the chosen version as described above, adds a systemd drop-in that starts `mysqld` under `numactl --interleave=all` with raised limits, starts MySQL and sets the root password.
 
----
-
-### Step 2/11 — Cluster Configuration (Nodes & SSH)
-Interactive wizard collects hostnames and IP addresses for all 3 cluster nodes, then SSH credentials (key or password authentication, sudo escalation).
-
-![Step 2 — Cluster Nodes & SSH](docs/screenshots/02-cluster-configuration-nodes-ssh.png)
-
----
-
-### Step 2/11 — Cluster Configuration (MySQL & System)
-Collects MySQL root and cluster admin credentials, cluster name, router user password, and NTP server settings.
-
-![Step 2 — MySQL Credentials & Settings](docs/screenshots/03-mysql-credentials-cluster-settings.png)
-
----
-
-### Configuration Summary
-All collected parameters are presented in a structured summary table before saving. User confirms with `y` to proceed.
-
-![Configuration Summary](docs/screenshots/04-configuration-summary.png)
-
----
-
-### Step 3 & 4/11 — Inventory Generation & SSH Connectivity Test
-Ansible inventory is auto-generated from collected inputs (IP-based, DNS-independent). SSH connectivity to all 3 nodes is validated before deployment.
-
-![Inventory Generation & SSH Test](docs/screenshots/05-inventory-ssh-test.png)
-
----
-
-### Step 9 & 10/11 — Deployment Confirmation & Ansible Execution
-Final confirmation before Ansible runs. Playbook output streams in real-time with all task results visible.
-
-![Deployment & Ansible Output](docs/screenshots/06-deployment-confirmation-ansible-output.png)
-
----
-
-### Step 11/11 — Play Recap & Setup Report
-Ansible PLAY RECAP parsed and presented as a structured node status table with success/failure counts.
-
-![Play Recap & Setup Report](docs/screenshots/07-play-recap-setup-report.png)
-
----
-
-### Applied Roles, Next Steps & File Locations
-All applied roles listed with descriptions. Next steps for cluster management and MySQL Router bootstrap provided.
-
-![Applied Roles & Next Steps](docs/screenshots/08-applied-roles-next-steps.png)
-
----
-
-## Directory Structure
-
-```
-morpheus-innodb-cluster/
-├── innodb_cluster_setup.py            # Main orchestrator script
-├── README.md
-│
-├── playbooks/
-│   ├── mysql-innodb.yml               # Main Ansible playbook entry point
-│   │
-│   ├── 01-os-preconfigure/            # Role: OS hardening & kernel tuning
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml              # sysctl parameters
-│   │   ├── tasks/
-│   │   │   ├── main.yml              # OS-family dispatcher
-│   │   │   ├── debian.yml            # Ubuntu/Debian tasks
-│   │   │   └── redhat.yml            # RHEL tasks
-│   │   ├── handlers/main.yml
-│   │   ├── files/issue.net           # SSH login banner text
-│   │   └── meta/main.yml
-│   │
-│   ├── 02-mysql-install/              # Role: MySQL installation (8.0 or 8.4)
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml
-│   │   ├── tasks/
-│   │   │   ├── main.yml              # OS-family dispatcher
-│   │   │   ├── debian.yml            # apt-based install + APT pinning + systemd drop-in
-│   │   │   └── redhat.yml            # dnf/yum-based install + stream management + systemd drop-in
-│   │   ├── handlers/main.yml
-│   │   └── meta/main.yml
-│   │
-│   ├── 03-mysql-innodb-cluster/       # Role: InnoDB Cluster pre-configuration
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml
-│   │   ├── tasks/main.yml
-│   │   ├── handlers/main.yml
-│   │   └── meta/main.yml
-│   │
-│   ├── 04-mysql-create-innodb-cluster/ # Role: Cluster creation (master node only)
-│   │   ├── defaults/main.yml
-│   │   ├── vars/main.yml
-│   │   ├── tasks/main.yml
-│   │   ├── handlers/main.yml
-│   │   └── meta/main.yml
-│   │
-│   # Generated at runtime:
-│   └── inventory.ini
-│
-# Generated at runtime:
-├── cluster_config.json                # Saved user configuration (reused on re-runs)
-├── cluster_setup.log                  # Full Ansible output log
-└── cluster_setup_report.txt          # Post-deployment summary report
-```
-
----
-
-## Configuration Variables
-
-The wizard collects the following information across 5 sections:
-
-### Section 1/5 — Cluster Nodes
-
-For each of the 3 nodes (1 master + 2 secondary):
-
-| Field | Example |
-|-------|---------|
-| Hostname | `mysql-innodb-ubuntu-1` |
-| IP Address | `192.168.42.100` |
-
-> Connectivity is IP-based throughout. DNS is not required — `/etc/hosts` is automatically populated on all nodes.
-
-### Section 2/5 — SSH Connection
-
-| Field | Default | Notes |
-|-------|---------|-------|
-| SSH User | `ansible` | User for Ansible connections |
-| SSH Key File | `~/.ssh/id_rsa` | Leave empty to use password auth |
-| SSH Password | — | Used if no key file provided |
-| Sudo Password | — | Required if user needs password for `sudo` |
-
-### Section 3/5 — MySQL Credentials
-
-| Field | Default | Notes |
-|-------|---------|-------|
-| MySQL Root Password | — | Alphanumeric recommended |
-| Cluster Admin Username | `clusterAdmin` | Manages the InnoDB Cluster |
-| Cluster Admin Password | — | Alphanumeric recommended |
-
-### Section 4/5 — Cluster Settings
-
-| Field | Default | Notes |
-|-------|---------|-------|
-| Cluster Name | `mysql-cluster` | InnoDB Cluster identifier |
-| Router User Password | — | For `routeruser` MySQL Router account |
-
-### Section 5/5 — System Settings
-
-| Field | Default |
-|-------|---------|
-| Primary NTP Server | `time.google.com` |
-| Fallback NTP Server | `pool.ntp.org` |
-
-All values are saved to `cluster_config.json` (mode `0600`). On subsequent runs the script offers to reuse the saved configuration.
-
----
-
-## What Gets Deployed
-
-### Pre-tasks — All Nodes
-- Populate `/etc/hosts` with all cluster node entries (IP + hostname pairs)
-- Set system hostname via Ansible `hostname` module
-
-### Role 01 — OS Pre-configuration
-
-Applied to all nodes. Hardens the OS and tunes kernel parameters for database workloads.
-
-| Task | Debian/Ubuntu | RedHat |
-|------|--------------|---------------|
-| SSH banner | Deploy to `/etc/issue.net`, drop-in `/etc/ssh/sshd_config.d/99-banner.conf` | Deploy to `/etc/issue.net`, update `sshd_config` (EL8) or drop-in (EL9) |
-| Security framework | Stop & disable AppArmor | SELinux → permissive |
-| Firewall | Disable UFW | Stop & disable firewalld |
-| Locale | `locale_gen` (en_US.UTF-8) | `glibc-langpack-en` + `localedef` |
-| NTP | `systemd-timesyncd` | `chrony` |
-| Package locks | Stop `unattended-upgrades`, clear apt/dpkg locks | — |
-| MySQL limits | `/etc/security/limits.d/99-mysql.conf` | `/etc/security/limits.d/99-mysql.conf` |
-| Transparent Huge Pages | Disabled | Disabled |
-| Kernel parameters | `/etc/sysctl.d/99-01-os-preconfigure.conf` | `/etc/sysctl.d/99-01-os-preconfigure.conf` |
-| GRUB | `transparent_hugepage=never` appended | `transparent_hugepage=never` appended |
-
-**Kernel parameters tuned (sysctl):**
-
-| Parameter | Value | Purpose |
-|-----------|-------|---------|
-| `net.core.somaxconn` | 65535 | Max socket connection queue |
-| `net.ipv4.tcp_max_syn_backlog` | 65535 | TCP SYN backlog |
-| `net.ipv4.tcp_fin_timeout` | 15 | Faster TIME_WAIT cleanup |
-| `net.ipv4.tcp_tw_reuse` | 1 | Reuse TIME_WAIT sockets |
-| `vm.swappiness` | 10 | Minimize swap usage |
-| `vm.dirty_ratio` | 15 | Dirty page write threshold |
-| `fs.file-max` | 2097152 | Max open file descriptors |
-| `fs.aio-max-nr` | 1048576 | Async I/O limit |
-
-**MySQL system limits applied (`/etc/security/limits.d/99-mysql.conf`):**
-```
-mysql soft nofile 65535
-mysql hard nofile 65535
-mysql soft nproc  65535
-mysql hard nproc  65535
-mysql soft memlock unlimited
-mysql hard memlock unlimited
-```
-
----
-
-### Role 02 — MySQL Installation
-
-Applied to all nodes. Installs MySQL from the official MySQL repository. The version is selected interactively in Step 8 before deployment.
-
-| Task | Debian/Ubuntu | RedHat |
-|------|--------------|---------------|
-| Repository | `mysql-apt-config` deb from `repo.mysql.com` | MySQL Community Release RPM (EL8/EL9 auto-detected) |
-| APT Pinning | `repo.mysql.com` pinned at priority 1001 | — |
-| Stream | Selected via `mysql-apt-config` debconf pre-seed | `dnf module enable mysql:<stream>` |
-| Packages | mysql-server, mysql-client, mysql-shell, python3-mysqldb, libmysqlclient-dev, numactl | mysql-server, mysql, python3-PyMySQL, numactl |
-| mysql-shell | Included in APT packages | From `mysql-tools-community` (8.0) or `mysql-tools-8.4-lts-community` (8.4) |
-| Version lock | `dpkg_selections` hold | `yum-plugin-versionlock` / `python3-dnf-plugin-versionlock` |
-| Service name | `mysql` | `mysqld` |
-
-**systemd drop-in applied to MySQL service (both OS families):**
-```ini
-[Service]
-LimitNOFILE=65535
-LimitNPROC=65535
-LimitMEMLOCK=infinity
-ExecStart=/usr/bin/numactl --interleave=all /usr/sbin/mysqld
-```
-
-Common tasks:
-- Start and enable MySQL service
-- Set MySQL root password with `caching_sha2_password` (idempotent: handles both fresh install and re-runs)
-- Verify service is running
-
----
-
-### Role 03 — InnoDB Cluster Pre-configuration
-
-Applied to all nodes. Prepares each MySQL instance for cluster membership.
-
-1. **Create Cluster Admin User**
-   - Full `ALL PRIVILEGES ON *.*` with `GRANT OPTION`
-   - Authentication: `caching_sha2_password`
-
-2. **Database Cleanup**
-   - Remove anonymous users
-   - Drop `test` database and its privilege entries
-
-3. **InnoDB Configuration** written to OS-specific path:
-   - Debian: `/etc/mysql/mysql.conf.d/innodb-mysqld.cnf`
-   - RedHat: `/etc/my.cnf.d/innodb-mysqld.cnf`
+**03-mysql-innodb-cluster (all nodes)** — writes `innodb-mysqld.cnf`:
 
 ```ini
 [mysqld]
-bind-address                    = 0.0.0.0
-max_connections                 = 451
-innodb_buffer_pool_size         = {80% of total RAM}G
-innodb_use_fdatasync            = ON
-innodb_numa_interleave          = ON
-sql_generate_invisible_primary_key = 1
-binlog_expire_logs_seconds      = 604800
-binlog_expire_logs_auto_purge   = ON
-gtid_mode                       = ON
-enforce_gtid_consistency        = ON
-server_id                       = {last octet of node IP}
+bind-address = 0.0.0.0
+max_connections = 451
+innodb_buffer_pool_size = <80% of RAM>G
+innodb_use_fdatasync = ON
+innodb_numa_interleave = ON
+sql_generate_invisible_primary_key = ON
+binlog_expire_logs_seconds = 604800
+binlog_expire_logs_auto_purge = ON
+gtid_mode = ON
+enforce_gtid_consistency = ON
+server_id = <last octet of the node IP>
 
 [mysqldump]
 set-gtid-purged = OFF
 ```
 
-4. **Restart MySQL** and verify all parameters applied correctly
+It then restarts MySQL and creates the cluster admin user (`ALL PRIVILEGES ... WITH GRANT OPTION`) with binary logging off for that session, so the nodes carry no errant GTIDs.
 
----
+**04-mysql-create-innodb-cluster (master only)** — one MySQL Shell script that runs `dba.configureInstance` on every node, creates the cluster (or reuses it), adds the two secondaries with clone recovery, creates or updates the `routeruser` account and prints `cluster.status()`. Re-running it keeps the existing cluster and members.
 
-### Role 04 — Cluster Creation (Master Node Only)
-
-Runs **only on the primary node** (`when: inventory_hostname == master_hostname`).
-
-1. **Wait for port 3306** on all cluster nodes (timeout: 480s)
-2. **Configure instances** via MySQL Shell (`dba.checkInstanceConfiguration` → `dba.configureInstance`)
-3. **Create cluster** on primary: `dba.createCluster(clusterName)`
-4. **Add secondary nodes**: `cluster.addInstance(host, {recoveryMethod: 'clone'})`
-5. **Verify cluster status**: `cluster.status()`
-6. **Create router account**: `cluster.setupRouterAccount('routeruser')` (idempotent with `{update: true}`)
-7. **Cleanup** temporary credential and JS script files from `/tmp/`
-
----
-
-## Re-running
-
-The entire workflow is idempotent and safe to re-run:
+## After the deployment
 
 ```bash
-# Re-run with saved configuration
-sudo python3 innodb_cluster_setup.py
-
-# Start fresh (delete saved config first)
-sudo rm cluster_config.json
-sudo python3 innodb_cluster_setup.py
-```
-
-| Concern | Behavior |
-|---------|----------|
-| Configuration | Loads `cluster_config.json` automatically; offers to reuse |
-| MySQL version | Previously selected version shown in summary; option to change |
-| MySQL root password | Tries socket auth first, then existing password |
-| Router account | Uses `{update: true}` if `routeruser` already exists |
-| Packages | Checks current state before installing |
-| Cluster creation | Will fail if cluster already exists — use `dba.rebootClusterFromCompleteOutage()` manually |
-
----
-
-## Post-Deployment
-
-```bash
-# Quick cluster status check
 mysqlsh clusterAdmin@<master-ip> -- cluster status
-
-# Interactive cluster management
-mysqlsh clusterAdmin@<master-ip>
-var cluster = dba.getCluster();
-cluster.status();
-
-# Bootstrap MySQL Router
 mysqlrouter --bootstrap routeruser@<master-ip>:3306 --user=mysqlrouter
 ```
 
----
+Ports between the nodes: 3306 (classic), 33060 (X protocol), 33061 (Group Replication).
 
-## Network Ports
+## Re-running parts of the playbook
 
-Ensure these ports are open **between all cluster nodes** (bidirectional):
+Each role has a tag: `os`, `install`, `configure`, `cluster`.
 
-| Port  | Protocol | Service |
-|-------|----------|---------|
-| 3306  | TCP | MySQL Classic Protocol |
-| 33060 | TCP | MySQL X Protocol |
-| 33061 | TCP | Group Replication |
+```bash
+cd playbooks
+ansible-playbook -i inventory.ini mysql-innodb.yml --tags cluster --extra-vars @extra_vars.json
+```
 
----
+`extra_vars.json` needs the keys the script writes in step 5 (see `run_playbook()` in the script).
 
-## Security Features
+## Files created at runtime
 
-- SSH key authentication preferred; password auth as fallback
-- `sudo` password support for privilege escalation
-- All generated config files: mode `0600`
-- Passwords never logged (`no_log: true` on sensitive tasks)
-- Terminal input masked for all password prompts
-- SSH login banner configured (`/etc/issue.net`)
-- SELinux set to permissive (RedHat) / AppArmor disabled (Debian)
-- Transparent Huge Pages disabled (MySQL performance requirement)
-- MySQL file descriptor and memory lock limits raised
-- NUMA-aware MySQL execution via `numactl --interleave=all`
-- Temporary cluster script files cleaned up from `/tmp/` after use
+| File | Purpose |
+|------|---------|
+| `cluster_config.json` (0600) | Saved answers, including passwords |
+| `playbooks/inventory.ini` (0600) | Ansible inventory, may contain the SSH/sudo password |
+| `cluster_setup.log` | Full Ansible output |
+| `cluster_setup_report.txt` | Summary |
 
----
+## Notes
 
-## Files Generated at Runtime
-
-| File | Location | Mode | Purpose |
-|------|----------|------|---------|
-| `cluster_config.json` | Project root | `0600` | Saved user configuration (reusable) |
-| `inventory.ini` | `playbooks/` | `0600` | Ansible inventory (auto-generated) |
-| `.extra_vars.json` | `playbooks/` | `0600` | Temporary extra-vars (removed after run) |
-| `cluster_setup.log` | Project root | — | Full Ansible output log |
-| `cluster_setup_report.txt` | Project root | — | Deployment summary report |
-
----
-
-## Troubleshooting
-
-| Issue | Solution |
-|-------|----------|
-| `Missing sudo password` | Re-run and answer `y` to the sudo password prompt |
-| `dpkg lock` on Debian | Script waits and clears locks automatically; also disables `unattended-upgrades` |
-| Root password task fails on re-run | Task is idempotent — tries socket auth first, then existing password |
-| Role 04 skipped on all nodes | Ensure `master_hostname` matches the master node IP in inventory |
-| Cluster creation fails with "already exists" | Run `dba.dropMetadataSchema()` in MySQL Shell then retry |
-| SSH connectivity test fails | Check firewall rules; script allows override to continue anyway |
-| `community.mysql` not found | Script installs it automatically via `ansible-galaxy` |
-| Internet connectivity check fails | Verify `repo.mysql.com` (Ubuntu) or `dev.mysql.com` (RedHat) is reachable on port 443 |
-| mysql-shell version mismatch (RedHat) | Ensure the correct tools repo is enabled: `mysql-tools-community` (8.0) or `mysql-tools-8.4-lts-community` (8.4) |
-| AppStream module conflict (RedHat) | Script runs `dnf module disable mysql` before enabling the selected stream automatically |
-
----
+- `server_id` is the last octet of the node IP. Nodes in different subnets (for example a second data center in a ClusterSet) can end up with the same value; set it by hand in that case.
+- The cluster admin user has full privileges from any host (`'%'`). Restrict it if your network requires it.
 
 ## License
 

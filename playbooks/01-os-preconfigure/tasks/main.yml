@@ -1,5 +1,142 @@
 ---
-# Dispatcher: include OS-specific tasks
+- name: Deploy the SSH login banner
+  copy:
+    src: issue.net
+    dest: /etc/issue.net
+    mode: "0644"
 
-- name: Include OS-specific tasks
-  include_tasks: "{{ ansible_os_family | lower }}.yml"
+- name: Enable the SSH banner
+  copy:
+    dest: /etc/ssh/sshd_config.d/99-banner.conf
+    content: "Banner /etc/issue.net\n"
+    mode: "0644"
+  when: not (ansible_os_family == 'RedHat' and ansible_distribution_major_version == '8')
+  notify: Restart sshd
+
+- name: Enable the SSH banner (RHEL 8 has no sshd_config.d)
+  lineinfile:
+    path: /etc/ssh/sshd_config
+    regexp: '^#?Banner'
+    line: Banner /etc/issue.net
+  when: ansible_os_family == 'RedHat' and ansible_distribution_major_version == '8'
+  notify: Restart sshd
+
+# ── Security services ──
+
+- name: Set SELinux to permissive at boot
+  lineinfile:
+    path: /etc/selinux/config
+    regexp: '^SELINUX='
+    line: SELINUX=permissive
+  when: ansible_os_family == 'RedHat'
+
+- name: Set SELinux to permissive now
+  command: setenforce 0
+  when: ansible_os_family == 'RedHat' and ansible_selinux.mode | default('') == 'enforcing'
+
+- name: Stop and disable the host firewall and AppArmor
+  systemd:
+    name: "{{ item }}"
+    state: stopped
+    enabled: false
+  loop: "{{ ['firewalld'] if ansible_os_family == 'RedHat' else ['ufw', 'apparmor', 'unattended-upgrades'] }}"
+  failed_when: false
+
+# ── Locale and time ──
+
+- name: Install the English locale (RHEL)
+  package:
+    name: glibc-langpack-en
+  when: ansible_os_family == 'RedHat'
+
+- name: Generate the English locale (Ubuntu)
+  command: locale-gen en_US.UTF-8
+  changed_when: false
+  when: ansible_os_family == 'Debian'
+
+- name: Set the system locale
+  command: localectl set-locale LANG=en_US.UTF-8
+  changed_when: false
+
+- name: Configure chrony (RHEL)
+  when: ansible_os_family == 'RedHat'
+  block:
+    - name: Install chrony
+      package:
+        name: chrony
+
+    - name: Comment out the other chrony servers
+      replace:
+        path: /etc/chrony.conf
+        regexp: '^((?:server|pool)\s+(?!(?:{{ ntp_primary | regex_escape }}|{{ ntp_fallback | regex_escape }})\s))'
+        replace: '# \1'
+      notify: Restart chronyd
+
+    - name: Add the NTP servers to chrony
+      blockinfile:
+        path: /etc/chrony.conf
+        marker: "# {mark} ANSIBLE MANAGED NTP SERVERS"
+        block: |
+          server {{ ntp_primary }} iburst
+          server {{ ntp_fallback }} iburst
+      notify: Restart chronyd
+
+- name: Configure systemd-timesyncd (Ubuntu)
+  lineinfile:
+    path: /etc/systemd/timesyncd.conf
+    regexp: "^#?{{ item.key }}="
+    line: "{{ item.key }}={{ item.value }}"
+  loop:
+    - { key: NTP, value: "{{ ntp_primary }}" }
+    - { key: FallbackNTP, value: "{{ ntp_fallback }}" }
+  when: ansible_os_family == 'Debian'
+  notify: Restart timesyncd
+
+- name: Enable NTP synchronisation
+  command: timedatectl set-ntp true
+  changed_when: false
+
+# ── Kernel and limits ──
+
+- name: Raise the mysql user limits
+  copy:
+    dest: /etc/security/limits.d/99-mysql.conf
+    content: |
+      mysql soft nofile  65535
+      mysql hard nofile  65535
+      mysql soft nproc   65535
+      mysql hard nproc   65535
+      mysql soft memlock unlimited
+      mysql hard memlock unlimited
+    mode: "0644"
+
+- name: Write kernel parameters
+  copy:
+    dest: /etc/sysctl.d/99-01-os-preconfigure.conf
+    content: |
+      {% for param in sysctl_params %}
+      {{ param.name }} = {{ param.value }}
+      {% endfor %}
+    mode: "0644"
+  notify: Apply kernel parameters
+
+- name: Disable Transparent Huge Pages now
+  shell: echo never > /sys/kernel/mm/transparent_hugepage/enabled && echo never > /sys/kernel/mm/transparent_hugepage/defrag
+  changed_when: false
+
+- name: Disable Transparent Huge Pages at boot (RHEL)
+  shell: >
+    grubby --info=DEFAULT | grep -q transparent_hugepage=never ||
+    { grubby --update-kernel=ALL --args=transparent_hugepage=never && echo changed; }
+  register: thp_grub
+  changed_when: "'changed' in thp_grub.stdout"
+  when: ansible_os_family == 'RedHat'
+
+- name: Disable Transparent Huge Pages at boot (Ubuntu)
+  lineinfile:
+    path: /etc/default/grub
+    regexp: '^(GRUB_CMDLINE_LINUX="(?!.*transparent_hugepage=never)[^"]*)"'
+    line: '\1 transparent_hugepage=never"'
+    backrefs: true
+  when: ansible_os_family == 'Debian'
+  notify: Update grub

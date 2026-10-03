@@ -1,5 +1,46 @@
 ---
-# Dispatcher: OS-specific tasks include installation, service startup, and root password setup
-
-- name: Include OS-specific tasks
+- name: Install MySQL packages
   include_tasks: "{{ ansible_os_family | lower }}.yml"
+
+- name: Create the systemd drop-in directory
+  file:
+    path: /etc/systemd/system/{{ mysql_service }}.service.d
+    state: directory
+    mode: "0755"
+
+- name: Run mysqld with NUMA interleaving and raised limits
+  copy:
+    dest: /etc/systemd/system/{{ mysql_service }}.service.d/limits.conf
+    content: |
+      [Service]
+      LimitNOFILE=65535
+      LimitNPROC=65535
+      LimitMEMLOCK=infinity
+      ExecStart=
+      ExecStart=/usr/bin/numactl --interleave=all {{ mysqld_binary }}
+    mode: "0644"
+  notify: Restart mysql
+
+- name: Start and enable MySQL
+  systemd:
+    name: "{{ mysql_service }}"
+    state: started
+    enabled: true
+    daemon_reload: true
+
+- name: Apply the drop-in before continuing
+  meta: flush_handlers
+
+# A fresh install lets root in over the socket without a password.
+- name: Check whether root still has no password
+  command: mysql -u root -e "SELECT 1"
+  register: root_without_password
+  changed_when: false
+  failed_when: false
+
+- name: Set the MySQL root password
+  command: >
+    mysql -u root -e "ALTER USER 'root'@'localhost'
+    IDENTIFIED WITH caching_sha2_password BY '{{ mysql_root_password }}'"
+  when: root_without_password.rc == 0
+  no_log: true

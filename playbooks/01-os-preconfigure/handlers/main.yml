@@ -1,21 +1,23 @@
 ---
-- name: restart_ssh_client
+- name: Restart sshd
   service:
     name: "{{ 'ssh' if ansible_os_family == 'Debian' else 'sshd' }}"
     state: restarted
 
-- name: restart_timesyncd
-  systemd:
-    name: systemd-timesyncd
-    state: restarted
-    enabled: yes
-
-- name: restart_chronyd
-  systemd:
+- name: Restart chronyd
+  service:
     name: chronyd
     state: restarted
-    enabled: yes
+    enabled: true
 
-- name: systemd daemon-reload
-  systemd:
-    daemon_reload: yes
+- name: Restart timesyncd
+  service:
+    name: systemd-timesyncd
+    state: restarted
+    enabled: true
+
+- name: Update grub
+  command: update-grub
+
+- name: Apply kernel parameters
+  command: sysctl --system

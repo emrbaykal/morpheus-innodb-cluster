@@ -1,1726 +1,428 @@
 #!/usr/bin/env python3
 """
-MySQL InnoDB Cluster Setup Orchestrator
-========================================
-Deploys a 3-node InnoDB Cluster by running from the master node.
+MySQL InnoDB Cluster setup.
 
-Usage:
-    sudo python3 innodb_cluster_setup.py
+Run on the master node:  sudo python3 innodb_cluster_setup.py
 
-Features:
-    - Automatically sets up the Ansible execution environment
-    - Collects required variables (hostname + IP) from the end user
-    - Saves variables to a file (skips prompts on subsequent runs)
-    - Uses IP addresses for all SSH/Ansible connectivity (DNS-independent)
-    - Populates /etc/hosts on all nodes for hostname resolution
-    - Streams Ansible playbook output to the terminal in real-time
-    - Generates a detailed post-setup report
+Asks for the cluster settings, lets you pick the MySQL version from what the
+repository currently offers, then runs playbooks/mysql-innodb.yml on all 3 nodes.
 """
 
-import os
-import sys
+import getpass
 import json
-import subprocess
+import os
+import re
 import shutil
 import socket
-import stat
+import subprocess
+import sys
 import time
-import re
-import signal
-import termios
-import tty
 from datetime import datetime
 from pathlib import Path
 
-# ─── Constants ────────────────────────────────────────────────────────────────
+VERSION = "2.0.0"
 
-VERSION = "1.2.0"
+BASE_DIR = Path(__file__).resolve().parent
+PLAYBOOK = BASE_DIR / "playbooks" / "mysql-innodb.yml"
+INVENTORY = BASE_DIR / "playbooks" / "inventory.ini"
+CONFIG_FILE = BASE_DIR / "cluster_config.json"
+LOG_FILE = BASE_DIR / "cluster_setup.log"
+REPORT_FILE = BASE_DIR / "cluster_setup_report.txt"
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-PLAYBOOKS_DIR = SCRIPT_DIR / "playbooks"
-CONFIG_FILE = SCRIPT_DIR / "cluster_config.json"
-INVENTORY_FILE = PLAYBOOKS_DIR / "inventory.ini"
-PLAYBOOK_FILE = PLAYBOOKS_DIR / "mysql-innodb.yml"
-REPORT_FILE = SCRIPT_DIR / "cluster_setup_report.txt"
-LOG_FILE = SCRIPT_DIR / "cluster_setup.log"
+MAJOR_VERSIONS = ["8.0", "8.4"]
+NODE_ROLES = ["Master", "Secondary 1", "Secondary 2"]
+TOTAL_STEPS = 6
 
-REQUIRED_PACKAGES_DEBIAN = [
-    "ansible",
-    "sshpass",
-    "python3-pip",
-]
+# Ubuntu: Oracle's APT index only lists the newest build of a series, but older
+# builds stay in the pool. Read the newest version from the index, then probe the
+# pool for every patch release below it. Prints "server X.Y.Z" / "shell X.Y.Z".
+UBUNTU_VERSIONS_CMD = r"""
+. /etc/os-release
+repo=https://repo.mysql.com/apt/ubuntu
+index=$(curl -fsS $repo/dists/$VERSION_CODENAME/__COMPONENT__/binary-amd64/Packages) || exit 1
+newest() { echo "$index" | awk -v p="$1" '$0 == "Package: " p {f=1} f && /^Version:/ {sub(/-.*/, "", $2); print $2; exit}'; }
+echo "shell $(newest mysql-shell)"
+last=$(newest mysql-community-server); last=${last##*.}
+for patch in $(seq 0 $last); do
+  v=__MAJOR__.$patch
+  curl -fsI -o /dev/null $repo/pool/__COMPONENT__/m/mysql-community/mysql-community-server_$v-1ubuntu${VERSION_ID}_amd64.deb && echo "server $v" &
+done
+wait
+"""
 
-REQUIRED_PACKAGES_REDHAT = [
-    "sshpass",
-    "python3-pip",
-]
+# RHEL: every mysql-server build in AppStream, modular streams included.
+RHEL_VERSIONS_CMD = "dnf -q repoquery --disable-modular-filtering --qf '%{version}' mysql-server"
 
-# Subscription-manager repo names for Ansible, keyed by RHEL major version.
-# RHEL 8 uses the dedicated ansible-2.9 repo; RHEL 9 uses the
-# Ansible Automation Platform stream repo.
-RHEL_ANSIBLE_REPOS = {
-    8: "ansible-2.9-for-rhel-8-x86_64-rpms",
-    9: "ansible-automation-platform-2.4-for-rhel-9-x86_64-rpms",
-}
 
-ANSIBLE_COLLECTIONS = [
-    "community.mysql",
-]
+# ─── Output and prompts ──────────────────────────────────────────────────────
 
-TOTAL_STEPS = 11
+GREEN, YELLOW, RED, CYAN, BOLD, END = "\033[92m", "\033[93m", "\033[91m", "\033[96m", "\033[1m", "\033[0m"
 
 
-# ─── Colors & Formatting ────────────────────────────────────────────────────
+def step(number, title):
+    print(f"\n{BOLD}[{number}/{TOTAL_STEPS}] {title}{END}\n{'─' * 60}")
 
-class Colors:
-    HEADER = "\033[95m"
-    BLUE = "\033[94m"
-    CYAN = "\033[96m"
-    GREEN = "\033[92m"
-    YELLOW = "\033[93m"
-    RED = "\033[91m"
-    BOLD = "\033[1m"
-    DIM = "\033[2m"
-    UNDERLINE = "\033[4m"
-    END = "\033[0m"
 
+def info(msg):
+    print(f"  {CYAN}{msg}{END}")
 
-# ─── Utility Functions ────────────────────────────────────────────────────────
 
-def signal_handler(sig, frame):
-    """Handle Ctrl+C gracefully."""
-    print(f"\n\n  {Colors.YELLOW}Operation cancelled by user (Ctrl+C).{Colors.END}")
-    print(f"  {Colors.CYAN}No changes were applied to the cluster.{Colors.END}\n")
-    sys.exit(130)
+def ok(msg):
+    print(f"  {GREEN}✓ {msg}{END}")
 
 
-signal.signal(signal.SIGINT, signal_handler)
-
-
-def print_banner():
-    banner = f"""
-{Colors.CYAN}{Colors.BOLD}\
-╔══════════════════════════════════════════════════════════════╗
-║           MySQL InnoDB Cluster Setup Orchestrator            ║
-║                    3-Node Cluster Deployment                 ║
-║                                                       v{VERSION} ║
-╚══════════════════════════════════════════════════════════════╝\
-{Colors.END}"""
-    print(banner)
-
-
-def print_step(step_num, title):
-    """Print a step header with progress indicator."""
-    progress = f"[Step {step_num}/{TOTAL_STEPS}]"
-    print(f"\n{Colors.BLUE}{Colors.BOLD}{'─' * 60}")
-    print(f"  {progress} {title}")
-    print(f"{'─' * 60}{Colors.END}\n")
-
-
-def print_section(title):
-    print(f"\n{Colors.BLUE}{Colors.BOLD}{'─' * 60}")
-    print(f"  {title}")
-    print(f"{'─' * 60}{Colors.END}\n")
-
-
-def print_success(msg):
-    print(f"  {Colors.GREEN}✓ {msg}{Colors.END}")
-
-
-def print_warning(msg):
-    print(f"  {Colors.YELLOW}⚠ {msg}{Colors.END}")
-
-
-def print_error(msg):
-    print(f"  {Colors.RED}✗ {msg}{Colors.END}")
-
-
-def print_info(msg):
-    print(f"  {Colors.CYAN}ℹ {msg}{Colors.END}")
-
-
-def print_hint(msg):
-    """Print a hint message for guidance."""
-    print(f"    {Colors.CYAN}{msg}{Colors.END}")
-
-
-def print_table_row(label, value, mask=False, col1=30, col2=37):
-    """Print a formatted table row for summary display."""
-    display_value = '*' * 8 if mask else value
-    print(f"  {Colors.BOLD}│{Colors.END} {label:<{col1 - 2}} {Colors.BOLD}│{Colors.END} {display_value:<{col2 - 2}} {Colors.BOLD}│{Colors.END}")
-
-
-def prompt_input(label, default=None, hint=None):
-    """Enhanced input prompt with default value and optional hint."""
-    if hint:
-        print_hint(hint)
-    if default:
-        value = input(f"    {Colors.BOLD}{label} [{default}]:{Colors.END} ").strip()
-        return value if value else default
-    else:
-        value = input(f"    {Colors.BOLD}{label}:{Colors.END} ").strip()
-        return value
-
-
-def read_password_masked(prompt_text):
-    """Read a password from stdin, showing * for each character."""
-    sys.stdout.write(prompt_text)
-    sys.stdout.flush()
-    password = []
-    fd = sys.stdin.fileno()
-    old_settings = termios.tcgetattr(fd)
-    try:
-        tty.setraw(fd)
-        while True:
-            ch = sys.stdin.read(1)
-            if ch in ('\r', '\n'):
-                sys.stdout.write('\r\n')
-                break
-            elif ch == '\x7f' or ch == '\x08':  # backspace
-                if password:
-                    password.pop()
-                    sys.stdout.write('\b \b')
-            elif ch == '\x03':  # Ctrl+C
-                sys.stdout.write('\r\n')
-                raise KeyboardInterrupt
-            else:
-                password.append(ch)
-                sys.stdout.write('*')
-            sys.stdout.flush()
-    finally:
-        termios.tcsetattr(fd, termios.TCSADRAIN, old_settings)
-    return ''.join(password)
-
-
-def prompt_password(label, min_length=4, confirm=True):
-    """Enhanced password prompt with masked input (shows *)."""
-    while True:
-        password = read_password_masked(f"    {Colors.BOLD}{label}:{Colors.END} ")
-        if len(password) < min_length:
-            print_error(f"Password must be at least {min_length} characters!")
-            continue
-        if confirm:
-            password_confirm = read_password_masked(f"    {Colors.BOLD}{label} (confirm):{Colors.END} ")
-            if password != password_confirm:
-                print_error("Passwords do not match! Please try again.")
-                continue
-        return password
-
-
-def prompt_yes_no(label, default_yes=True):
-    """Yes/No prompt with clear default."""
-    suffix = "[Y/n]" if default_yes else "[y/N]"
-    choice = input(f"    {Colors.BOLD}{label} {suffix}:{Colors.END} ").strip().lower()
-    if default_yes:
-        return choice not in ('n', 'no')
-    else:
-        return choice in ('y', 'yes')
-
-
-def prompt_choice(label, choices, default=None):
-    """Present a numbered list of choices and return the selected value."""
-    default_idx = choices.index(default) + 1 if default in choices else None
-    print_hint(f"{label}:")
-    for i, choice in enumerate(choices, 1):
-        marker = "  ← default" if choice == default else ""
-        print_hint(f"  {i}. {choice}{marker}")
-    while True:
-        suffix = f"{default_idx}" if default_idx else ""
-        raw = input(f"    {Colors.BOLD}Choice [{suffix}]:{Colors.END} ").strip()
-        if not raw and default:
-            return default
-        try:
-            idx = int(raw) - 1
-            if 0 <= idx < len(choices):
-                return choices[idx]
-        except ValueError:
-            pass
-        print_error(f"Please enter a number between 1 and {len(choices)}.")
-
-
-def run_command(cmd, capture=False, check=True, env=None):
-    """Execute a shell command with optional streaming output."""
-    try:
-        if capture:
-            result = subprocess.run(
-                cmd, shell=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-                universal_newlines=True, check=check, env=env
-            )
-            return result
-        else:
-            result = subprocess.run(
-                cmd, shell=True, check=check, env=env
-            )
-            return result
-    except subprocess.CalledProcessError as e:
-        if capture:
-            return e
-        raise
-
-
-def run_ansible_shell(ip, inventory_file, shell_cmd):
-    """Run ansible shell module without going through a local shell.
-
-    Uses subprocess.run with shell=False so that special characters
-    in shell_cmd (quotes, dollar signs, etc.) are passed verbatim to
-    ansible without being interpreted by the local shell first.
-    """
-    result = subprocess.run(
-        ["ansible", str(ip), "-i", str(inventory_file), "-m", "shell", "-a", shell_cmd],
-        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
-        universal_newlines=True,
-    )
-    return result
-
-
-def run_command_stream(cmd, log_file=None, env=None):
-    """Execute a command and stream output in real-time while capturing it."""
-    output_lines = []
-
-    process = subprocess.Popen(
-        cmd, shell=True,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.STDOUT,
-        universal_newlines=True,
-        bufsize=1,
-        env=env
-    )
-
-    with open(log_file, "a") if log_file else open(os.devnull, "w") as log:
-        for line in process.stdout:
-            sys.stdout.write(line)
-            sys.stdout.flush()
-            output_lines.append(line.rstrip())
-            if log_file:
-                log.write(line)
-                log.flush()
-
-    process.wait()
-    return process.returncode, output_lines
-
-
-def validate_ip(ip):
-    """Validate an IP address."""
-    try:
-        socket.inet_aton(ip)
-        return True
-    except socket.error:
-        return False
-
-
-def validate_hostname(hostname):
-    """Validate a hostname (not IP)."""
-    if re.match(r'^[a-zA-Z0-9]([a-zA-Z0-9\-\.]*[a-zA-Z0-9])?$', hostname):
-        return True
-    return False
-
-
-def format_duration(seconds):
-    """Format seconds into human-readable duration."""
-    if seconds < 60:
-        return f"{seconds:.0f} seconds"
-    elif seconds < 3600:
-        mins = int(seconds // 60)
-        secs = int(seconds % 60)
-        return f"{mins} min {secs} sec"
-    else:
-        hours = int(seconds // 3600)
-        mins = int((seconds % 3600) // 60)
-        return f"{hours} hr {mins} min"
-
-
-# ─── Environment Setup ───────────────────────────────────────────────────────
-
-def detect_os_family():
-    """Detect the OS family of the local machine (where the script runs).
-
-    Returns 'debian' or 'redhat'. Exits if unsupported.
-    """
-    os_release = Path("/etc/os-release")
-    if os_release.exists():
-        content = os_release.read_text().lower()
-        if any(d in content for d in ("ubuntu", "debian")):
-            return "debian"
-        if any(d in content for d in ("rhel", "centos", "rocky", "alma", "fedora", "red hat")):
-            return "redhat"
-
-    # Fallback: check for package managers
-    if shutil.which("apt-get"):
-        return "debian"
-    if shutil.which("dnf") or shutil.which("yum"):
-        return "redhat"
-
-    print_error("Unsupported operating system. Only Debian/Ubuntu and RedHat/CentOS are supported.")
+def fail(msg):
+    print(f"  {RED}✗ {msg}{END}")
     sys.exit(1)
 
 
-def detect_rhel_major_version():
-    """Detect the RHEL/CentOS major version number.
-
-    Returns an integer (e.g. 8 or 9), or None if it cannot be determined.
-    """
-    os_release = Path("/etc/os-release")
-    if os_release.exists():
-        for line in os_release.read_text().splitlines():
-            if line.startswith("VERSION_ID="):
-                version_str = line.split("=", 1)[1].strip().strip('"')
-                try:
-                    return int(version_str.split(".")[0])
-                except ValueError:
-                    pass
-    return None
+def ask(label, default="", check=None, allow_empty=False):
+    while True:
+        suffix = f" [{default}]" if default else ""
+        value = input(f"    {label}{suffix}: ").strip() or default
+        if (value or allow_empty) and (check is None or not value or check(value)):
+            return value
+        print(f"    {RED}Invalid value, try again.{END}")
 
 
-def check_rhel_ansible_repo_enabled(repo_name):
-    """Check whether a subscription-manager repository is currently enabled.
+def ask_password(label, current=""):
+    """Ask twice for a password. With a current value, Enter keeps it."""
+    hint = " (Enter = keep)" if current else ""
+    while True:
+        password = getpass.getpass(f"    {label}{hint}: ")
+        if not password and current:
+            return current
+        if len(password) < 4:
+            print(f"    {RED}At least 4 characters.{END}")
+        elif password != getpass.getpass(f"    {label} (again): "):
+            print(f"    {RED}Passwords do not match.{END}")
+        else:
+            return password
 
-    Returns True if enabled, False otherwise (including when
-    subscription-manager is not available).
-    """
-    if not shutil.which("subscription-manager"):
+
+def ask_yes(label, default=True):
+    answer = input(f"    {label} [{'Y/n' if default else 'y/N'}]: ").strip().lower()
+    return default if not answer else answer in ("y", "yes")
+
+
+def choose(label, options, default=None):
+    print(f"    {label}:")
+    for number, option in enumerate(options, 1):
+        print(f"      {number}. {option}{'   (default)' if option == default else ''}")
+    default_number = str(options.index(default) + 1) if default in options else ""
+    while True:
+        answer = input(f"    Choice [{default_number}]: ").strip() or default_number
+        if answer.isdigit() and 1 <= int(answer) <= len(options):
+            return options[int(answer) - 1]
+        print(f"    {RED}Enter a number between 1 and {len(options)}.{END}")
+
+
+def is_ip(value):
+    try:
+        socket.inet_aton(value)
+        return value.count(".") == 3
+    except OSError:
         return False
-    result = run_command(
-        f"subscription-manager repos --list-enabled 2>/dev/null | grep -q '{repo_name}'",
-        capture=True, check=False,
-    )
-    return result.returncode == 0
 
 
-def check_root():
-    """Check if running as root or with sudo."""
-    if os.geteuid() != 0:
-        print_error("This script must be run with root privileges.")
-        print()
-        print_hint("Run with:  sudo python3 innodb_cluster_setup.py")
-        print()
-        sys.exit(1)
+def is_hostname(value):
+    return re.match(r"^[a-zA-Z0-9]([a-zA-Z0-9.-]*[a-zA-Z0-9])?$", value) is not None
 
+
+def version_key(version):
+    return tuple(int(part) for part in version.split("."))
+
+
+# ─── Commands ────────────────────────────────────────────────────────────────
+
+def run(command):
+    return subprocess.run(command, shell=True, stdout=subprocess.PIPE,
+                          stderr=subprocess.STDOUT, universal_newlines=True)
+
+
+def run_on_node(ip, command):
+    """Run a shell command on a node through Ansible. Returns stdout lines, or None on failure."""
+    result = subprocess.run(["ansible", ip, "-i", str(INVENTORY), "-m", "shell", "-a", command],
+                            stdout=subprocess.PIPE, stderr=subprocess.PIPE, universal_newlines=True)
+    if result.returncode != 0:
+        return None
+    # The first line is Ansible's "<ip> | CHANGED | rc=0 >>" header.
+    return [line.strip() for line in result.stdout.splitlines()[1:] if line.strip()]
+
+
+# ─── Steps ───────────────────────────────────────────────────────────────────
 
 def setup_environment():
-    """Install required packages and Ansible collections."""
-    print_step(1, "ENVIRONMENT SETUP")
+    step(1, "Environment")
+    if os.geteuid() != 0:
+        fail("Run as root: sudo python3 innodb_cluster_setup.py")
 
-    os_family = detect_os_family()
-    print_info(f"Detected OS family: {os_family.upper()}")
-    print_info("Checking and installing prerequisites...\n")
-
-    if os_family == "debian":
-        required_packages = REQUIRED_PACKAGES_DEBIAN
-        update_cmd = "apt-get update -qq"
-        check_cmd = "dpkg -l {pkg} 2>/dev/null | grep -q '^ii'"
-        install_cmd = "apt-get install -y -qq {pkg}"
+    if shutil.which("apt-get"):
+        install, packages = "apt-get install -y -qq", {"ansible": "ansible", "sshpass": "sshpass"}
+        run("apt-get update -qq")
     else:
-        required_packages = REQUIRED_PACKAGES_REDHAT
-        update_cmd = "dnf makecache -q" if shutil.which("dnf") else "yum makecache -q"
-        check_cmd = "rpm -q {pkg} >/dev/null 2>&1"
-        install_cmd = ("dnf install -y -q {pkg}" if shutil.which("dnf")
-                       else "yum install -y -q {pkg}")
+        install, packages = "dnf install -y -q", {"ansible": "ansible-core", "sshpass": "sshpass"}
 
-    # Update package cache
-    sys.stdout.write(f"  {Colors.CYAN}Updating package lists...{Colors.END}")
-    sys.stdout.flush()
-    result = run_command(update_cmd, capture=True, check=False)
-    if result.returncode == 0:
-        print(f"\r  {Colors.GREEN}✓ Package lists updated.{Colors.END}          ")
-    else:
-        print(f"\r  {Colors.YELLOW}⚠ Package list update had issues, continuing...{Colors.END}")
+    for command, package in packages.items():
+        if not shutil.which(command):
+            info(f"Installing {package} ...")
+            if run(f"{install} {package}").returncode != 0:
+                fail(f"Could not install {package}.")
 
-    # Install required OS packages
-    for pkg in required_packages:
-        sys.stdout.write(f"  {Colors.CYAN}Checking '{pkg}'...{Colors.END}")
-        sys.stdout.flush()
-        check = run_command(check_cmd.format(pkg=pkg), capture=True, check=False)
-        if check.returncode == 0:
-            print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
-        else:
-            print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'installing...':>12}")
-            result = run_command(install_cmd.format(pkg=pkg), capture=True, check=False)
-            if result.returncode == 0:
-                print(f"\033[1A\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
-            else:
-                print_error(f"Failed to install '{pkg}': {result.stderr}")
-                sys.exit(1)
+    ok(run("ansible --version").stdout.splitlines()[0])
 
-    # On RedHat, install Ansible via subscription-manager repo (if enabled)
-    # or fall back to pip when the repo is not active.
-    if os_family == "redhat":
-        pkg = "ansible"
-        sys.stdout.write(f"  {Colors.CYAN}Checking '{pkg}'...{Colors.END}")
-        sys.stdout.flush()
-        check = run_command("ansible --version >/dev/null 2>&1", capture=True, check=False)
-        if check.returncode == 0:
-            print(f"\r  {Colors.GREEN}✓ {pkg:<30}{Colors.END} {'installed':>12}")
-        else:
-            # Clear the "Checking..." line before printing multi-line status messages
-            print(f"\r  {Colors.YELLOW}  {pkg:<30}{Colors.END} {'not installed':>13}")
-
-            # Determine the expected subscription-manager repo for this RHEL version.
-            rhel_ver = detect_rhel_major_version()
-            ansible_repo = RHEL_ANSIBLE_REPOS.get(rhel_ver)
-
-            ansible_installed = False
-
-            if ansible_repo:
-                print_info(f"Detected RHEL {rhel_ver}. Expected Ansible repo: {ansible_repo}")
-                if check_rhel_ansible_repo_enabled(ansible_repo):
-                    # Repo is enabled – install via dnf/yum.
-                    print_info(f"Installing ansible via dnf/yum...")
-                    pkg_mgr_install = (
-                        f"dnf install -y -q ansible" if shutil.which("dnf")
-                        else "yum install -y -q ansible"
-                    )
-                    result = run_command(pkg_mgr_install, capture=True, check=False)
-                    if result.returncode == 0:
-                        print_success(f"{pkg:<30} {'installed':>12}")
-                        ansible_installed = True
-                    else:
-                        print_warning(
-                            f"dnf/yum install of ansible failed even though repo '{ansible_repo}' "
-                            "appears enabled. Falling back to pip..."
-                        )
-                else:
-                    print_warning(
-                        f"Ansible repository '{ansible_repo}' is NOT enabled in "
-                        "subscription-manager. Falling back to pip installation..."
-                    )
-                    print_hint(
-                        f"To enable it manually run:\n"
-                        f"    subscription-manager repos --enable={ansible_repo}"
-                    )
-            else:
-                print_warning(
-                    f"No known Ansible subscription-manager repo for RHEL {rhel_ver}. "
-                    "Falling back to pip installation..."
-                )
-
-            if not ansible_installed:
-                # Fallback: install ansible via pip3.
-                print_info("Installing ansible via pip3...")
-                result = run_command("pip3 install ansible", capture=True, check=False)
-                if result.returncode == 0:
-                    print_success(f"{pkg:<30} {'installed (pip)':>15}")
-                else:
-                    print_error(f"Failed to install '{pkg}' via pip3: {result.stderr}")
-                    sys.exit(1)
-
-    # Install Ansible collections
-    for collection in ANSIBLE_COLLECTIONS:
-        sys.stdout.write(f"  {Colors.CYAN}Checking '{collection}'...{Colors.END}")
-        sys.stdout.flush()
-        check = run_command(
-            f"ansible-galaxy collection list {collection} 2>/dev/null | grep -q '{collection}'",
-            capture=True, check=False
-        )
-        if check.returncode == 0:
-            print(f"\r  {Colors.GREEN}✓ {collection:<30}{Colors.END} {'installed':>12}")
-        else:
-            print(f"\r  {Colors.YELLOW}  {collection:<30}{Colors.END} {'installing...':>12}")
-            result = run_command(
-                f"ansible-galaxy collection install {collection}",
-                capture=True, check=False
-            )
-            if result.returncode == 0:
-                print(f"\033[1A\r  {Colors.GREEN}✓ {collection:<30}{Colors.END} {'installed':>12}")
-            else:
-                print_error(f"Failed to install '{collection}': {result.stderr}")
-                sys.exit(1)
-
-    # Verify ansible is accessible
-    result = run_command("ansible --version", capture=True, check=False)
-    if result.returncode == 0:
-        version_line = result.stdout.split('\n')[0]
-        print()
-        print_success(f"Environment ready. ({version_line})")
-    else:
-        print_error("Ansible not found after installation!")
-        sys.exit(1)
-
-    # Verify playbooks directory exists
-    if not PLAYBOOKS_DIR.exists():
-        print_error(f"Playbooks directory not found: {PLAYBOOKS_DIR}")
-        print_hint("Expected structure:")
-        print_hint(f"  {SCRIPT_DIR.name}/")
-        print_hint(f"    innodb_cluster_setup.py")
-        print_hint(f"    playbooks/")
-        print_hint(f"      mysql-innodb.yml")
-        print_hint(f"      01-os-preconfigure/")
-        print_hint(f"      02-mysql-install/")
-        print_hint(f"      03-mysql-innodb-cluster/")
-        print_hint(f"      04-mysql-create-innodb-cluster/")
-        sys.exit(1)
-
-    if not PLAYBOOK_FILE.exists():
-        print_error(f"Playbook file not found: {PLAYBOOK_FILE}")
-        sys.exit(1)
-
-
-# ─── Configuration Management ────────────────────────────────────────────────
 
 def load_config():
-    """Load existing configuration if available."""
-    if CONFIG_FILE.exists():
-        try:
-            with open(CONFIG_FILE, "r") as f:
-                config = json.load(f)
-            return config
-        except (json.JSONDecodeError, IOError):
-            return None
-    return None
+    try:
+        return json.loads(CONFIG_FILE.read_text())
+    except (OSError, ValueError):
+        return {}
 
 
 def save_config(config):
-    """Save configuration to file."""
-    with open(CONFIG_FILE, "w") as f:
-        json.dump(config, f, indent=4)
+    CONFIG_FILE.write_text(json.dumps(config, indent=4))
     os.chmod(CONFIG_FILE, 0o600)
-    print_success(f"Configuration saved to: {CONFIG_FILE}")
 
 
-def display_config_summary(config, title="CONFIGURATION SUMMARY"):
-    """Display a formatted summary table of all configuration."""
-    print_section(title)
-
-    nodes = config["nodes"]
-
-    COL1 = 30
-
-    # Calculate COL2 dynamically based on longest value
-    all_values = [
-        f"{node['hostname']} ({node['ip']})" for node in nodes
-    ] + [
-        config['ssh_user'],
-        config.get('ssh_key_file', ''),
-        config['innodb_admin_user'],
-        config['innodb_cluster_name'],
-        config.get('ntp_primary', 'time.google.com'),
-        config.get('ntp_fallback', 'pool.ntp.org'),
-        config.get('mysql_version', ''),
-        config.get('mysql_version_full', ''),
+def show_config(config):
+    rows = [(f"{role} node", f"{node['hostname']} ({node['ip']})")
+            for role, node in zip(NODE_ROLES, config["nodes"])]
+    rows += [
+        ("SSH user", config["ssh_user"]),
+        ("SSH auth", f"key {config['ssh_key_file']}" if config.get("ssh_key_file") else "password"),
+        ("Privilege escalation", config["become_method"]),
+        ("Cluster name", config["innodb_cluster_name"]),
+        ("Cluster admin user", config["innodb_admin_user"]),
+        ("NTP servers", f"{config['ntp_primary']}, {config['ntp_fallback']}"),
     ]
-    max_val_len = max(len(v) for v in all_values if v)
-    COL2 = max(37, max_val_len + 4)  # +4 for padding (2 each side)
-
-    def _row(label, value, mask=False):
-        print_table_row(label, value, mask=mask, col1=COL1, col2=COL2)
-
-    def _separator():
-        print(f"  {Colors.BOLD}├{'─' * COL1}┼{'─' * COL2}┤{Colors.END}")
-
-    def _section_header(text):
-        print(f"  {Colors.BOLD}│{('  ' + text):<{COL1}}│{'':<{COL2}}│{Colors.END}")
-
-    # Table top border
-    print(f"  {Colors.BOLD}┌{'─' * COL1}┬{'─' * COL2}┐{Colors.END}")
-    _section_header("CLUSTER NODES")
-    _separator()
-    for label, node in [("Master Node", nodes[0]), ("Slave Node 1", nodes[1]), ("Slave Node 2", nodes[2])]:
-        _row(label, f"{node['hostname']} ({node['ip']})")
-
-    _separator()
-    _section_header("SSH CONNECTION")
-    _separator()
-    _row("SSH User", config['ssh_user'])
-    if config.get("ssh_key_file"):
-        _row("SSH Key File", config['ssh_key_file'])
-    if config.get("ssh_password"):
-        _row("SSH Password", "", mask=True)
-    _row("Become Method", config.get('become_method', 'sudo'))
-    _row("Become Password", config.get('become_password', ''), mask=bool(config.get('become_password')))
-
-    _separator()
-    _section_header("MYSQL CONFIGURATION")
-    _separator()
-    _row("MySQL Root Password", "", mask=True)
-    _row("Cluster Admin User", config['innodb_admin_user'])
-    _row("Cluster Admin Password", "", mask=True)
-    _row("Cluster Name", config['innodb_cluster_name'])
-    _row("Router User (routeruser)", "", mask=True)
     if config.get("mysql_version_full"):
-        _row("MySQL Version", config["mysql_version_full"])
-        _row("MySQL AppStream Stream", config.get("mysql_version", ""))
-    elif config.get("mysql_version"):
-        _row("MySQL AppStream Stream", config["mysql_version"])
-    elif config.get("mysql_apt_version"):
-        _row("MySQL APT Version", config["mysql_apt_version"])
-
-    _separator()
-    _section_header("SYSTEM SETTINGS")
-    _separator()
-    _row("NTP Primary Server", config.get('ntp_primary', 'time.google.com'))
-    _row("NTP Fallback Server", config.get('ntp_fallback', 'pool.ntp.org'))
-    print(f"  {Colors.BOLD}└{'─' * COL1}┴{'─' * COL2}┘{Colors.END}")
+        rows.append(("MySQL version", config["mysql_version_full"]))
+    print()
+    for label, value in rows:
+        print(f"    {label:<22} {value}")
     print()
 
 
-def collect_node_info(node_num, label):
-    """Collect hostname and IP address for a single node."""
-    print(f"\n    {Colors.CYAN}[Node {node_num}/3]{Colors.END} {Colors.BOLD}{label}{Colors.END}")
+def collect_config(old):
+    """Ask every setting. Values from the previous answers are offered as defaults."""
+    config = {"nodes": []}
+    old_nodes = old.get("nodes") or [{}, {}, {}]
 
-    while True:
-        hostname = input(f"      Hostname : ").strip()
-        if validate_hostname(hostname):
-            break
-        print_error("Invalid hostname! Use alphanumeric characters, hyphens and dots only.")
+    print(f"\n  {BOLD}Cluster nodes{END} (the first node is the master)")
+    for role, previous in zip(NODE_ROLES, old_nodes):
+        config["nodes"].append({
+            "hostname": ask(f"{role} hostname", previous.get("hostname", ""), is_hostname),
+            "ip": ask(f"{role} IP address", previous.get("ip", ""), is_ip),
+        })
 
-    while True:
-        ip = input(f"      IP Address: ").strip()
-        if validate_ip(ip):
-            break
-        print_error("Invalid IP address format! Example: 192.168.1.10")
+    print(f"\n  {BOLD}SSH connection{END}")
+    config["ssh_user"] = ask("SSH user", old.get("ssh_user", "ansible"))
+    default_key = old.get("ssh_key_file", os.path.expanduser("~/.ssh/id_rsa"))
+    key = ask("SSH key file (empty = password)", default_key if os.path.exists(default_key) else "",
+              os.path.exists, allow_empty=True)
+    config["ssh_key_file"] = key
+    config["ssh_password"] = "" if key else ask_password("SSH password", old.get("ssh_password", ""))
+    config["become_method"] = choose("Privilege escalation", ["sudo", "dzdo"], old.get("become_method", "sudo"))
+    config["become_password"] = ""
+    if ask_yes(f"Does {config['become_method']} need a password?", bool(old.get("become_password"))):
+        config["become_password"] = ask_password(f"{config['become_method']} password", old.get("become_password", ""))
 
-    print_success(f"{hostname} ({ip})")
-    return {"hostname": hostname, "ip": ip}
+    print(f"\n  {BOLD}MySQL{END}")
+    config["mysql_root_password"] = ask_password("MySQL root password", old.get("mysql_root_password", ""))
+    config["innodb_admin_user"] = ask("Cluster admin user", old.get("innodb_admin_user", "clusterAdmin"))
+    config["innodb_admin_password"] = ask_password("Cluster admin password", old.get("innodb_admin_password", ""))
+    config["innodb_cluster_name"] = ask("Cluster name", old.get("innodb_cluster_name", "mysql-cluster"))
+    config["router_password"] = ask_password("MySQL Router user (routeruser) password", old.get("router_password", ""))
 
+    print(f"\n  {BOLD}NTP{END}")
+    config["ntp_primary"] = ask("Primary NTP server", old.get("ntp_primary", "time.google.com"))
+    config["ntp_fallback"] = ask("Fallback NTP server", old.get("ntp_fallback", "pool.ntp.org"))
 
-def collect_variables():
-    """Collect all required variables from user in organized sections."""
-    print_step(2, "CLUSTER CONFIGURATION")
-    print_info("Please provide the required information below.")
-    print_hint("Press Enter to accept default values shown in [brackets].\n")
-
-    config = {}
-
-    # ── Section 1: Node Information ──────────────────────────
-    print(f"  {Colors.YELLOW}{Colors.BOLD}Section 1/5: Cluster Nodes{Colors.END}")
-    print_hint("Enter hostname and IP address for each of the 3 cluster nodes.")
-    print_hint("The first node will be the master (primary) node.\n")
-
-    config["nodes"] = []
-    config["nodes"].append(collect_node_info(1, "Master Node (Primary)"))
-    config["nodes"].append(collect_node_info(2, "Slave Node 1 (Secondary)"))
-    config["nodes"].append(collect_node_info(3, "Slave Node 2 (Secondary)"))
-
-    # ── Section 2: SSH Connection ────────────────────────────
-    print(f"\n  {Colors.YELLOW}{Colors.BOLD}Section 2/5: SSH Connection{Colors.END}")
-    print_hint("Ansible connects to nodes via SSH. Provide credentials below.\n")
-
-    config["ssh_user"] = prompt_input("SSH User", default="ansible")
-
-    default_key = os.path.expanduser("~/.ssh/id_rsa")
-    print_hint("If you don't use an SSH key, just press Enter and provide a password instead.")
-    ssh_key_input = prompt_input("SSH Key File", default=default_key)
-
-    # User pressed Enter with default but file doesn't exist, or explicitly cleared it
-    if ssh_key_input == default_key and not os.path.exists(default_key):
-        ssh_key_input = ""
-
-    if ssh_key_input and not os.path.exists(ssh_key_input):
-        print_warning(f"SSH key file not found: {ssh_key_input}")
-        ssh_key_input = ""
-
-    if not ssh_key_input:
-        print_info("No SSH key — switching to password authentication.")
-        config["ssh_password"] = prompt_password("SSH Password")
-        config["ssh_key_file"] = ""
-    else:
-        config["ssh_key_file"] = ssh_key_input
-
-    print()
-    config["become_method"] = prompt_choice(
-        "Privilege escalation method", ["sudo", "dzdo"], default="sudo"
-    )
-    print()
-    become_label = config["become_method"].capitalize()
-    if prompt_yes_no(f"Does the SSH user require a {become_label} password?", default_yes=False):
-        config["become_password"] = prompt_password(f"{become_label} Password")
-    else:
-        config["become_password"] = ""
-
-    # ── Section 3: MySQL Credentials ─────────────────────────
-    print(f"\n  {Colors.YELLOW}{Colors.BOLD}Section 3/5: MySQL Credentials{Colors.END}")
-    print_hint("Set passwords for MySQL root and the InnoDB cluster admin user.\n")
-
-    config["mysql_root_password"] = prompt_password("MySQL Root Password")
-    print_success("MySQL root password set.")
-
-    print()
-    config["innodb_admin_user"] = prompt_input(
-        "Cluster Admin Username", default="clusterAdmin",
-        hint="This user will manage the InnoDB cluster."
-    )
-    config["innodb_admin_password"] = prompt_password("Cluster Admin Password")
-    print_success("Cluster admin credentials set.")
-
-    # ── Section 4: Cluster Settings ──────────────────────────
-    print(f"\n  {Colors.YELLOW}{Colors.BOLD}Section 4/5: Cluster Settings{Colors.END}\n")
-
-    config["innodb_cluster_name"] = prompt_input("Cluster Name", default="mysql-cluster")
-
-    print()
-    print_hint("A 'routeruser' account will be created for MySQL Router bootstrap.")
-    config["router_password"] = prompt_password("Router User Password")
-    print_success("Router user password set.")
-
-    # ── Section 5: System Settings ───────────────────────────
-    print(f"\n  {Colors.YELLOW}{Colors.BOLD}Section 5/5: System Settings{Colors.END}")
-    print_hint("NTP time synchronization servers for all cluster nodes.\n")
-
-    config["ntp_primary"] = prompt_input("Primary NTP Server", default="time.google.com")
-    config["ntp_fallback"] = prompt_input("Fallback NTP Server", default="pool.ntp.org")
-
+    for key in ("mysql_version", "mysql_version_full", "mysql_shell_version"):
+        if old.get(key):
+            config[key] = old[key]
     return config
 
 
-def get_configuration():
-    """Get configuration - load from file or collect from user."""
-    existing_config = load_config()
-
-    if existing_config:
-        display_config_summary(existing_config, "EXISTING CONFIGURATION FOUND")
-
-        print_info("A saved configuration was found from a previous run.")
-        print()
-        if prompt_yes_no("Use this existing configuration?", default_yes=True):
-            print_success("Using existing configuration.")
-            return existing_config
-        else:
-            print_info("Starting fresh configuration...\n")
-
-    config = collect_variables()
-    config["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-
-    # Show summary and allow correction
-    display_config_summary(config)
+def get_config():
+    step(2, "Cluster configuration")
+    config = load_config()
+    if config:
+        info("Saved configuration found:")
+        show_config(config)
+        if ask_yes("Use it?"):
+            return config
 
     while True:
-        if prompt_yes_no("Is this configuration correct?", default_yes=True):
+        config = collect_config(config)
+        show_config(config)
+        if ask_yes("Is this correct?"):
             break
-        else:
-            print()
-            print_info("Which section would you like to change?")
-            print(f"    {Colors.BOLD}1{Colors.END} - Cluster Nodes")
-            print(f"    {Colors.BOLD}2{Colors.END} - SSH Connection")
-            print(f"    {Colors.BOLD}3{Colors.END} - MySQL Credentials")
-            print(f"    {Colors.BOLD}4{Colors.END} - Cluster Settings")
-            print(f"    {Colors.BOLD}5{Colors.END} - System Settings")
-            print(f"    {Colors.BOLD}A{Colors.END} - Re-enter all values")
-            print()
-            section = input(f"    {Colors.BOLD}Section [1-5/A]:{Colors.END} ").strip().lower()
-
-            if section == '1':
-                config["nodes"] = []
-                print(f"\n  {Colors.YELLOW}{Colors.BOLD}Re-entering: Cluster Nodes{Colors.END}\n")
-                config["nodes"].append(collect_node_info(1, "Master Node (Primary)"))
-                config["nodes"].append(collect_node_info(2, "Slave Node 1 (Secondary)"))
-                config["nodes"].append(collect_node_info(3, "Slave Node 2 (Secondary)"))
-            elif section == '2':
-                print(f"\n  {Colors.YELLOW}{Colors.BOLD}Re-entering: SSH Connection{Colors.END}\n")
-                config["ssh_user"] = prompt_input("SSH User", default=config.get("ssh_user", "ansible"))
-                default_key = os.path.expanduser("~/.ssh/id_rsa")
-                config["ssh_key_file"] = prompt_input("SSH Key File", default=config.get("ssh_key_file", default_key))
-                if not os.path.exists(config["ssh_key_file"]):
-                    print_warning(f"SSH key file not found: {config['ssh_key_file']}")
-                    if prompt_yes_no("Connect with SSH password instead?", default_yes=True):
-                        config["ssh_password"] = prompt_password("SSH Password")
-                        config["ssh_key_file"] = ""
-                    else:
-                        print_error("An SSH key file or password is required!")
-                        sys.exit(1)
-                print()
-                config["become_method"] = prompt_choice(
-                    "Privilege escalation method", ["sudo", "dzdo"],
-                    default=config.get("become_method", "sudo")
-                )
-                print()
-                become_label = config["become_method"].capitalize()
-                if prompt_yes_no(f"Does the SSH user require a {become_label} password?", default_yes=False):
-                    config["become_password"] = prompt_password(f"{become_label} Password")
-                else:
-                    config["become_password"] = ""
-            elif section == '3':
-                print(f"\n  {Colors.YELLOW}{Colors.BOLD}Re-entering: MySQL Credentials{Colors.END}\n")
-                config["mysql_root_password"] = prompt_password("MySQL Root Password")
-                config["innodb_admin_user"] = prompt_input("Cluster Admin Username", default=config.get("innodb_admin_user", "clusterAdmin"))
-                config["innodb_admin_password"] = prompt_password("Cluster Admin Password")
-            elif section == '4':
-                print(f"\n  {Colors.YELLOW}{Colors.BOLD}Re-entering: Cluster Settings{Colors.END}\n")
-                config["innodb_cluster_name"] = prompt_input("Cluster Name", default=config.get("innodb_cluster_name", "mysql-cluster"))
-                config["router_password"] = prompt_password("Router User Password")
-            elif section == '5':
-                print(f"\n  {Colors.YELLOW}{Colors.BOLD}Re-entering: System Settings{Colors.END}\n")
-                config["ntp_primary"] = prompt_input("Primary NTP Server", default=config.get("ntp_primary", "time.google.com"))
-                config["ntp_fallback"] = prompt_input("Fallback NTP Server", default=config.get("ntp_fallback", "pool.ntp.org"))
-            elif section == 'a':
-                config = collect_variables()
-                config["created_at"] = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-            else:
-                print_error("Invalid selection. Please enter 1-5 or A.")
-                continue
-
-            display_config_summary(config)
-
     save_config(config)
+    ok(f"Saved to {CONFIG_FILE}")
     return config
 
 
-# ─── Inventory & Ansible Execution ──────────────────────────────────────────
-
-def generate_inventory(config):
-    """Generate Ansible inventory file.
-
-    Uses IP addresses as inventory hosts for DNS-independent connectivity.
-    Sets node_hostname as a host variable for each node so playbooks can
-    reference the hostname when needed (e.g. /etc/hosts, MySQL Shell).
-    """
-    print_step(3, "GENERATING INVENTORY")
-
-    nodes = config["nodes"]
-
-    lines = [
-        "[mysql_nodes]",
-    ]
-
-    for node in nodes:
-        lines.append(f"{node['ip']} node_hostname={node['hostname']}")
-
-    lines.append("")
-    lines.append("[mysql_nodes:vars]")
-    lines.append(f"ansible_user={config['ssh_user']}")
-
-    if config.get("ssh_key_file"):
+def write_inventory_and_test(config):
+    step(3, "Inventory and SSH test")
+    lines = ["[mysql_nodes]"]
+    lines += [f"{node['ip']} node_hostname={node['hostname']}" for node in config["nodes"]]
+    lines += ["", "[mysql_nodes:vars]", f"ansible_user={config['ssh_user']}"]
+    if config["ssh_key_file"]:
         lines.append(f"ansible_ssh_private_key_file={config['ssh_key_file']}")
-
-    if config.get("ssh_password"):
+    else:
         lines.append(f"ansible_ssh_pass={config['ssh_password']}")
-
-    lines.append("ansible_ssh_common_args='-o StrictHostKeyChecking=no'")
-    lines.append("ansible_become=true")
-    lines.append(f"ansible_become_method={config.get('become_method', 'sudo')}")
-
-    if config.get("become_password"):
+    lines += ["ansible_ssh_common_args='-o StrictHostKeyChecking=no'",
+              "ansible_become=true", f"ansible_become_method={config['become_method']}"]
+    if config["become_password"]:
         lines.append(f"ansible_become_pass={config['become_password']}")
-    lines.append("")
+    INVENTORY.write_text("\n".join(lines) + "\n")
+    os.chmod(INVENTORY, 0o600)
+    ok(f"Inventory written: {INVENTORY}")
 
-    inventory_content = "\n".join(lines)
-
-    with open(INVENTORY_FILE, "w") as f:
-        f.write(inventory_content)
-    os.chmod(INVENTORY_FILE, 0o600)
-
-    print_info("Generated inventory:")
-    for line in lines:
-        if "ansible_ssh_pass" in line or "ansible_become_pass" in line:
-            key = line.split('=')[0]
-            print(f"    {Colors.CYAN}{key}=********{Colors.END}")
+    unreachable = []
+    for role, node in zip(NODE_ROLES, config["nodes"]):
+        if run(f"ansible {node['ip']} -i {INVENTORY} -m ping").returncode == 0:
+            ok(f"{role:<12} {node['hostname']} ({node['ip']})")
         else:
-            print(f"    {Colors.CYAN}{line}{Colors.END}")
+            print(f"  {RED}✗ {role:<12} {node['hostname']} ({node['ip']}){END}")
+            unreachable.append(node["ip"])
+    if unreachable:
+        fail("Fix SSH access to the nodes above and run the script again.")
 
-    print_success(f"Inventory file saved: {INVENTORY_FILE}")
 
+def list_versions(master_ip, major):
+    """Return (server versions oldest first, newest MySQL Shell version or None) for one series."""
+    os_ids = " ".join(run_on_node(master_ip, ". /etc/os-release; echo $ID $ID_LIKE") or [])
 
-def test_connectivity(config):
-    """Test SSH connectivity to all nodes using IP addresses."""
-    print_step(4, "SSH CONNECTIVITY TEST")
-    print_info("Testing SSH connection to each node...\n")
-
-    nodes = config["nodes"]
-    failed_nodes = []
-    roles = ["Master", "Slave 1", "Slave 2"]
-
-    for i, node in enumerate(nodes):
-        label = f"{node['hostname']} ({node['ip']})"
-        sys.stdout.write(f"  {Colors.CYAN}[{roles[i]:>8}] Testing {label}...{Colors.END}")
-        sys.stdout.flush()
-
-        result = run_command(
-            f"ansible {node['ip']} -i {INVENTORY_FILE} -m ping --one-line"
-            f" -e \"ansible_ssh_common_args='-o StrictHostKeyChecking=no -T'\"",
-            capture=True, check=False
-        )
-        if result.returncode == 0 and "SUCCESS" in (result.stdout or ""):
-            print(f"\r  {Colors.GREEN}✓ [{roles[i]:>8}] {label:<40} OK{Colors.END}")
-        else:
-            print(f"\r  {Colors.RED}✗ [{roles[i]:>8}] {label:<40} FAILED{Colors.END}")
-            stderr = getattr(result, 'stderr', '') or ''
-            stdout = getattr(result, 'stdout', '') or ''
-            if stderr:
-                print_hint(f"Error: {stderr.strip()[:80]}")
-            if stdout:
-                print_hint(f"Output: {stdout.strip()[:80]}")
-            failed_nodes.append(label)
-
-    print()
-    if failed_nodes:
-        print_error(f"Unreachable nodes: {', '.join(failed_nodes)}")
-        print()
-        if not prompt_yes_no("Continue despite failed connections?", default_yes=False):
-            print_info("Operation cancelled.")
-            sys.exit(1)
+    if "debian" in os_ids or "ubuntu" in os_ids:
+        component = "mysql-8.0" if major == "8.0" else "mysql-8.4-lts"
+        command = UBUNTU_VERSIONS_CMD.replace("__COMPONENT__", component).replace("__MAJOR__", major)
+        lines = [line.split() for line in run_on_node(master_ip, command) or []]
+        servers = [v for kind, v in lines if kind == "server"]
+        shell = next((v for kind, v in lines if kind == "shell"), None)
     else:
-        print_success("All nodes are reachable!")
+        servers = [v for v in run_on_node(master_ip, RHEL_VERSIONS_CMD) or []
+                   if v.startswith(major + ".")]
+        shell = None  # dnf installs the newest MySQL Shell of the series
+
+    return sorted(set(servers), key=version_key), shell
 
 
-def check_rhel_repos_on_nodes(config):
-    """Check required RHEL subscription-manager repositories on all cluster nodes.
+def select_mysql_version(config):
+    step(4, "MySQL version")
+    if config.get("mysql_version_full"):
+        info(f"Saved choice: MySQL {config['mysql_version_full']}")
+        if ask_yes("Keep it?"):
+            return
 
-    Runs a quick OS detection first. If none of the nodes are RHEL, the step
-    is skipped entirely — no output is shown for non-RHEL environments.
-    """
-    nodes = config["nodes"]
-    roles = ["Master", "Slave 1", "Slave 2"]
+    major = choose("MySQL series", MAJOR_VERSIONS, config.get("mysql_version", "8.0"))
+    info(f"Reading the MySQL {major} versions available to {config['nodes'][0]['ip']} ...")
+    versions, shell = list_versions(config["nodes"][0]["ip"], major)
+    if not versions:
+        fail(f"No MySQL {major} packages found. Check the node's repositories and internet access.")
 
-    # ── OS detection: check master node only (all nodes share the same OS) ────
-    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID:-unknown}:${VERSION_ID%%.*}"'
-    master_ip = nodes[0]["ip"]
-    result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
-
-    os_id, rhel_ver = "unknown", "?"
-    if result.returncode == 0:
-        past_header = False
-        for line in (result.stdout or "").strip().split('\n'):
-            if past_header and line.strip():
-                parts = line.strip().split(":", 1)
-                os_id = parts[0] if parts else "unknown"
-                rhel_ver = parts[1] if len(parts) > 1 else "?"
-                break
-            if ">>" in line:
-                past_header = True
-
-    # Not RHEL — skip the step entirely
-    if os_id != "rhel":
-        return {}
-
-    # ── RHEL confirmed: run repo check on all nodes ───────────────────────────
-    print_step(5, "RHEL REPOSITORY CHECK")
-    print_info(f"RHEL {rhel_ver} detected. Checking subscription-manager repositories...\n")
-
-    repo_cmd = (
-        '. /etc/os-release 2>/dev/null; '
-        'VER="${VERSION_ID%%.*}"; '
-        'if [ "$VER" = "8" ]; then '
-        '  REPOS="rhel-8-for-x86_64-baseos-rpms rhel-8-for-x86_64-appstream-rpms"; '
-        'elif [ "$VER" = "9" ]; then '
-        '  REPOS="rhel-9-for-x86_64-baseos-rpms rhel-9-for-x86_64-appstream-rpms"; '
-        "else "
-        '  echo "UNKNOWN_VER:${VER}"; exit 0; '
-        "fi; "
-        "for repo in $REPOS; do "
-        '  if subscription-manager repos --list-enabled 2>/dev/null | grep -q "$repo"; then '
-        '    echo "REPO_ENABLED:${repo}"; '
-        "  else "
-        '    echo "REPO_DISABLED:${repo}"; '
-        "  fi; "
-        "done"
-    )
-
-    repo_check_results = {}
-    any_repo_disabled = False
-
-    for i, node in enumerate(nodes):
-        ip = node["ip"]
-        label = f"{node['hostname']} ({ip})"
-        repo_check_results[ip] = {"os": "rhel", "rhel_version": rhel_ver, "repos": {}}
-
-        print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
-
-        result = run_ansible_shell(ip, INVENTORY_FILE, repo_cmd)
-
-        if result.returncode != 0:
-            print(f"    {Colors.DIM}  Repository check failed (ansible error){Colors.END}")
-            print()
-            continue
-
-        output_lines = []
-        past_header = False
-        for line in (result.stdout or "").strip().split('\n'):
-            if past_header and line.strip():
-                output_lines.append(line.strip())
-            if ">>" in line:
-                past_header = True
-
-        for line in output_lines:
-            if line.startswith("REPO_ENABLED:"):
-                repo = line.split(":", 1)[1]
-                repo_check_results[ip]["repos"][repo] = True
-                print(f"    {Colors.GREEN}✓  {repo}{Colors.END}")
-            elif line.startswith("REPO_DISABLED:"):
-                repo = line.split(":", 1)[1]
-                repo_check_results[ip]["repos"][repo] = False
-                any_repo_disabled = True
-                print(f"    {Colors.RED}✗  {repo}  (NOT ENABLED){Colors.END}")
-            elif line.startswith("UNKNOWN_VER:"):
-                ver = line.split(":", 1)[1]
-                print(f"    {Colors.YELLOW}⚠  RHEL {ver} — no predefined repo list for this version{Colors.END}")
-
-        print()
-
-    if any_repo_disabled:
-        print_warning("One or more required RHEL repositories are NOT enabled!")
-        print_warning("Enable missing repos with:")
-        print_hint("  subscription-manager repos --enable=<repo-name>")
-        print()
-        if not prompt_yes_no("Continue despite missing repositories?", default_yes=False):
-            print_info("Operation cancelled. Please enable the required repositories and re-run.")
-            sys.exit(1)
-    else:
-        print_success("All required RHEL repositories are enabled.")
-
-    return repo_check_results
-
-
-def check_mysql_packages_on_nodes(config):
-    """Check for pre-existing MySQL packages on all cluster nodes via Ansible ad-hoc."""
-    print_step(6, "PRE-FLIGHT MYSQL PACKAGE CHECK")
-    print_info("Checking for pre-existing MySQL installations on all nodes...\n")
-
-    nodes = config["nodes"]
-    roles = ["Master", "Slave 1", "Slave 2"]
-
-    # Shell command: try rpm first (RHEL/CentOS), fall back to dpkg (Debian/Ubuntu)
-    def _pkg_cmd(name, community_name):
-        # rpm prints "package X is not installed" to stdout on failure even with
-        # --queryformat, so we silence it entirely and only query the version
-        # when the package is confirmed present (exit 0).
-        return (
-            f'V=""; '
-            f'if rpm -q {name} >/dev/null 2>&1; then '
-            f'  V=$(rpm -q --queryformat "%{{VERSION}}-%{{RELEASE}}" {name} 2>/dev/null); '
-            f'fi; '
-            f'if [ -z "$V" ] && rpm -q {community_name} >/dev/null 2>&1; then '
-            f'  V=$(rpm -q --queryformat "%{{VERSION}}-%{{RELEASE}}" {community_name} 2>/dev/null); '
-            f'fi; '
-            f'if [ -z "$V" ]; then '
-            f'  V=$(dpkg-query -W -f="${{Version}}" {name} 2>/dev/null); '
-            f'fi; '
-            f'[ -z "$V" ] && V=NOT_INSTALLED; '
-            f'echo "$V"'
-        )
-
-    pkg_cmds = {
-        "mysql-server": _pkg_cmd("mysql-server", "mysql-community-server"),
-        "mysql-shell":  _pkg_cmd("mysql-shell",  "mysql-community-shell"),
-    }
-
-    pre_check_results = {}
-    any_mysql_found = False
-
-    for i, node in enumerate(nodes):
-        ip = node["ip"]
-        label = f"{node['hostname']} ({ip})"
-        pre_check_results[ip] = {}
-
-        print(f"  {Colors.CYAN}[{roles[i]:>8}] {label}{Colors.END}")
-
-        for pkg_name, shell_cmd in pkg_cmds.items():
-            result = run_ansible_shell(ip, INVENTORY_FILE, shell_cmd)
-
-            version = "N/A"
-            if result.returncode == 0:
-                # Ansible output format:
-                #   ip | CHANGED | rc=0 >>
-                #   <actual stdout>
-                output = result.stdout or ""
-                past_header = False
-                for line in output.strip().split('\n'):
-                    if past_header and line.strip():
-                        version = line.strip()
-                        break
-                    if ">>" in line:
-                        past_header = True
-
-            if version and version not in ("NOT_INSTALLED", "N/A", ""):
-                pre_check_results[ip][pkg_name] = version
-                any_mysql_found = True
-                print(f"    {Colors.YELLOW}⚠  {pkg_name:<25} {version}{Colors.END}")
-            else:
-                pre_check_results[ip][pkg_name] = "N/A"
-                print(f"    {Colors.GREEN}✓  {pkg_name:<25} not installed{Colors.END}")
-
-        print()
-
-    if any_mysql_found:
-        print_warning("Pre-existing MySQL packages detected on one or more nodes!")
-        print_warning("Review the versions above before proceeding with the playbooks.")
-    else:
-        print_success("No pre-existing MySQL installations found on any node.")
-
-    return pre_check_results
-
-
-def check_internet_connectivity(config):
-    """Verify that all cluster nodes can reach the MySQL package repository (TCP 443).
-    Uses repo.mysql.com for Debian/Ubuntu and dev.mysql.com for RHEL-based systems.
-    """
-    print_step(7, "INTERNET CONNECTIVITY CHECK")
-
-    nodes = config["nodes"]
-    roles = ["Master", "Slave 1", "Slave 2"]
-
-    # Detect OS on master node to pick the correct target host
-    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID:-unknown}"'
-    master_ip = nodes[0]["ip"]
-    os_result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
-    os_id = "unknown"
-    if os_result.returncode == 0:
-        past_header = False
-        for line in (os_result.stdout or "").strip().split('\n'):
-            if past_header and line.strip():
-                os_id = line.strip().lower()
-                break
-            if ">>" in line:
-                past_header = True
-
-    if any(d in os_id for d in ("ubuntu", "debian")):
-        target_host = "repo.mysql.com"
-    else:
-        target_host = "dev.mysql.com"
-
-    print_info(f"Checking connectivity to {target_host} on all nodes...\n")
-
-    # Use bash /dev/tcp – no curl/wget dependency required.
-    # Explicitly invoke bash because Ubuntu's /bin/sh (dash) does not support /dev/tcp.
-    check_cmd = (
-        f'bash -c "(echo > /dev/tcp/{target_host}/443) 2>/dev/null '
-        '&& echo REACHABLE || echo UNREACHABLE"'
-    )
-
-    any_unreachable = False
-
-    for i, node in enumerate(nodes):
-        ip = node["ip"]
-        label = f"{node['hostname']} ({ip})"
-        sys.stdout.write(f"  {Colors.CYAN}[{roles[i]:>8}] Checking {label}...{Colors.END}")
-        sys.stdout.flush()
-
-        result = run_ansible_shell(ip, INVENTORY_FILE, check_cmd)
-        output = " ".join(_parse_ansible_output(result))
-        reachable = result.returncode == 0 and "REACHABLE" in output and "UNREACHABLE" not in output
-
-        if reachable:
-            print(f"\r  {Colors.GREEN}✓ [{roles[i]:>8}] {label:<40} {target_host} OK{Colors.END}")
-        else:
-            print(f"\r  {Colors.RED}✗ [{roles[i]:>8}] {label:<40} {target_host} UNREACHABLE{Colors.END}")
-            any_unreachable = True
-
-    print()
-    if any_unreachable:
-        print_warning(f"One or more nodes cannot reach {target_host}!")
-        print_warning("The playbook requires this to download the MySQL community release package.")
-        print()
-        if not prompt_yes_no("Continue despite connectivity issues?", default_yes=False):
-            print_info("Operation cancelled. Please check network/firewall settings and re-run.")
-            sys.exit(1)
-    else:
-        print_success(f"All nodes can reach {target_host}.")
-
-
-def _parse_ansible_output(result):
-    """Extract lines after the '>>' header from an ansible shell result."""
-    lines = []
-    if result.returncode != 0:
-        return lines
-    past_header = False
-    for line in (result.stdout or "").strip().split('\n'):
-        if past_header and line.strip():
-            lines.append(line.strip())
-        if ">>" in line:
-            past_header = True
-    return lines
-
-
-def select_mysql_version_debian(config):
-    """If the cluster nodes run a Debian/Ubuntu OS, ask the user which
-    MySQL apt-config stream to install (e.g. mysql-8.0 or mysql-8.4-lts).
-
-    The selection is saved to config['mysql_apt_version'] and passed to
-    Ansible as an extra-var so that debian.yml can debconf-set-selections
-    with the correct value.
-    Returns config (possibly updated).
-    """
-    master_ip = config["nodes"][0]["ip"]
-
-    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID:-unknown}"'
-    result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
-    os_id = " ".join(_parse_ansible_output(result)).lower()
-
-    is_debian_family = any(d in os_id for d in ("ubuntu", "debian"))
-    if not is_debian_family:
-        return config
-
-    print_step(8, "MYSQL VERSION SELECTION")
-
-    available_versions = ["mysql-8.0", "mysql-8.4-lts"]
-    default_version = config.get("mysql_apt_version", "mysql-8.0")
-
-    if config.get("mysql_apt_version"):
-        print_success(f"MySQL version already configured: {config['mysql_apt_version']}")
-        if prompt_yes_no("Keep this version?", default_yes=True):
-            return config
-
-    print_info("Debian/Ubuntu detected. Select the MySQL version to install:\n")
-    selected = prompt_choice(
-        "Select MySQL version to install",
-        available_versions,
-        default=default_version,
-    )
-
-    config["mysql_apt_version"] = selected
-    print_success(f"MySQL apt version '{selected}' selected.")
+    newest_first = versions[::-1]
+    config["mysql_version"] = major
+    config["mysql_version_full"] = choose(f"MySQL {major} version", newest_first, newest_first[0])
+    config["mysql_shell_version"] = shell or ""
     save_config(config)
-    return config
-
-
-def select_mysql_version_redhat(config):
-    """If the cluster nodes run a RedHat-family OS:
-      1. Ask which AppStream stream to use (8.0 or 8.4, default 8.0).
-      2. If stream changed, run: dnf module disable mysql + dnf module enable mysql:<stream>
-      3. Query available mysql-server versions from that stream.
-      4. Ask the user to select a specific version.
-
-    Both mysql_version (stream) and mysql_version_full are saved to config.
-    Returns config (possibly updated).
-    """
-    master_ip = config["nodes"][0]["ip"]
-
-    # Detect OS family on master node via /etc/os-release
-    os_detect_cmd = '. /etc/os-release 2>/dev/null && echo "${ID_LIKE:-${ID:-unknown}}"'
-    result = run_ansible_shell(master_ip, INVENTORY_FILE, os_detect_cmd)
-    os_family = " ".join(_parse_ansible_output(result)).lower()
-
-    is_redhat_family = any(d in os_family for d in ("rhel", "centos", "fedora", "rocky", "alma"))
-    if not is_redhat_family:
-        return config
-
-    print_step(8, "MYSQL VERSION SELECTION")
-
-    # If already fully configured, confirm and skip
-    if config.get("mysql_version") and config.get("mysql_version_full"):
-        print_success(
-            f"MySQL version already configured: {config['mysql_version_full']} "
-            f"(stream: {config['mysql_version']})"
-        )
-        if prompt_yes_no("Keep this version?", default_yes=True):
-            return config
-
-    # ── Step 1: Stream selection ──────────────────────────────────────────────
-    available_streams = ["8.0", "8.4"]
-    default_stream = config.get("mysql_version", "8.0")
-    if default_stream not in available_streams:
-        default_stream = "8.0"
-
-    print_info("RedHat-family OS detected. First, select the MySQL AppStream stream:\n")
-    selected_stream = prompt_choice(
-        "Select MySQL AppStream stream",
-        available_streams,
-        default=default_stream,
-    )
-
-    # ── Step 2: Apply stream if != 8.0 (8.0 is the default, no action needed) ─
-    if selected_stream != "8.0":
-        print_info(f"Applying AppStream stream mysql:{selected_stream} on master node...\n")
-        disable_cmd = "dnf module disable mysql -y 2>&1"
-        enable_cmd  = f"dnf module enable mysql:{selected_stream} -y 2>&1"
-        r1 = run_ansible_shell(master_ip, INVENTORY_FILE, disable_cmd)
-        if r1.returncode != 0:
-            print_warning("dnf module disable mysql returned non-zero — continuing anyway.")
-        r2 = run_ansible_shell(master_ip, INVENTORY_FILE, enable_cmd)
-        if r2.returncode != 0:
-            print_warning(f"dnf module enable mysql:{selected_stream} returned non-zero — continuing anyway.")
-        else:
-            print_success(f"AppStream stream mysql:{selected_stream} enabled.")
-    else:
-        print_info("Stream 8.0 selected — no module switch needed.\n")
-
-    # ── Step 3: List available versions from the selected stream ──────────────
-    print_info(f"Querying available mysql-server versions from stream {selected_stream}...\n")
-    list_cmd = (
-        "dnf list --showduplicates mysql-server -q 2>/dev/null | "
-        "awk '/^mysql-server/{v=$2; sub(/^[0-9]*:/,\"\",v); sub(/-.*/,\"\",v); print v}' | "
-        "sort -Vu"
-    )
-    result = run_ansible_shell(master_ip, INVENTORY_FILE, list_cmd)
-    available_versions = [
-        v for v in _parse_ansible_output(result) if re.match(r'^\d+\.\d+\.\d+', v)
-    ]
-
-    # ── Step 4: Version selection ─────────────────────────────────────────────
-    if not available_versions:
-        print_warning("Could not list available mysql-server versions from repositories.")
-        print_hint(f"Common versions for stream {selected_stream}: "
-                   f"{'8.0.36, 8.0.40' if selected_stream == '8.0' else '8.4.3, 8.4.5'}")
-        mysql_version_full = prompt_input(
-            "MySQL version to install",
-            default="8.0.36" if selected_stream == "8.0" else "8.4.3",
-        )
-    else:
-        print_info(f"Available mysql-server versions (stream {selected_stream}):\n")
-        mysql_version_full = prompt_choice(
-            "Select MySQL version to install",
-            available_versions,
-            default=available_versions[-1],
-        )
-
-    config["mysql_version"] = selected_stream
-    config["mysql_version_full"] = mysql_version_full
-    print_success(f"MySQL {mysql_version_full} (stream: {selected_stream}) selected.")
-    save_config(config)
-    return config
-
-
-def build_extra_vars(config):
-    """Build the extra-vars JSON for ansible-playbook.
-
-    master_hostname is set to the master's IP address because
-    inventory_hostname in Ansible will be the IP (inventory host key).
-    """
-    nodes = config["nodes"]
-
-    # Build hosts_entries list for /etc/hosts population
-    hosts_entries = []
-    for node in nodes:
-        hosts_entries.append({"ip": node["ip"], "hostname": node["hostname"]})
-
-    extra_vars = {
-        "mysql_root_password": config["mysql_root_password"],
-        "innodb_admin_user": config["innodb_admin_user"],
-        "innodb_admin_password": config["innodb_admin_password"],
-        "innodb_cluster_name": config["innodb_cluster_name"],
-        "master_hostname": nodes[0]["ip"],       # IP for inventory matching
-        "cluster_hosts_entries": hosts_entries,   # for /etc/hosts population
-        "router_password": config.get("router_password", ""),
-        "ntp_primary": config.get("ntp_primary", "time.google.com"),
-        "ntp_fallback": config.get("ntp_fallback", "pool.ntp.org"),
-        "mysql_version": config.get("mysql_version", ""),
-        "mysql_version_full": config.get("mysql_version_full", ""),
-        "mysql_apt_version": config.get("mysql_apt_version", "mysql-8.0"),
-    }
-    return json.dumps(extra_vars)
+    ok(f"MySQL {config['mysql_version_full']} selected"
+       + (f" (MySQL Shell {shell})" if shell else ""))
 
 
 def run_playbook(config):
-    """Run the Ansible playbook with real-time output."""
-    print_step(10, "RUNNING ANSIBLE PLAYBOOK")
-
-    extra_vars = build_extra_vars(config)
-
-    # Write extra vars to a temp file (more secure than CLI)
-    extra_vars_file = PLAYBOOKS_DIR / ".extra_vars.json"
-    with open(extra_vars_file, "w") as f:
-        f.write(extra_vars)
-    os.chmod(extra_vars_file, 0o600)
-
-    cmd = (
-        f"ansible-playbook "
-        f"-i {INVENTORY_FILE} "
-        f"{PLAYBOOK_FILE} "
-        f"--extra-vars '@{extra_vars_file}'"
-    )
-
-    nodes = config["nodes"]
-    print_info(f"Cluster   : {config['innodb_cluster_name']}")
-    print_info(f"Master    : {nodes[0]['hostname']} ({nodes[0]['ip']})")
-    print_info(f"Playbook  : {PLAYBOOK_FILE.name}")
-    print_info(f"Started at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print()
-    print_hint("This process may take 10-20 minutes depending on network speed.")
-    print_hint("Do not close this terminal until deployment is complete.")
-    print(f"\n{Colors.YELLOW}{'═' * 60}{Colors.END}")
-    print(f"{Colors.YELLOW}  ANSIBLE OUTPUT{Colors.END}")
-    print(f"{Colors.YELLOW}{'═' * 60}{Colors.END}\n")
-
-    # Initialize log file
-    with open(LOG_FILE, "w") as f:
-        f.write(f"MySQL InnoDB Cluster Setup Log\n")
-        f.write(f"Started: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"{'=' * 60}\n\n")
-
-    start_time = time.time()
-    returncode, output_lines = run_command_stream(cmd, log_file=str(LOG_FILE))
-    elapsed = time.time() - start_time
-
-    print(f"\n{Colors.YELLOW}{'═' * 60}{Colors.END}")
-    print_info(f"Finished at: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-    print_info(f"Duration   : {format_duration(elapsed)}")
-
-    # Append end time to log
-    with open(LOG_FILE, "a") as f:
-        f.write(f"\n{'=' * 60}\n")
-        f.write(f"Finished: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}\n")
-        f.write(f"Duration: {elapsed:.1f} seconds\n")
-        f.write(f"Exit code: {returncode}\n")
-
-    # Clean up extra vars file
-    if extra_vars_file.exists():
-        extra_vars_file.unlink()
-
-    return returncode, output_lines, elapsed
-
-
-# ─── Report Generation ───────────────────────────────────────────────────────
-
-def parse_ansible_recap(output_lines):
-    """Parse the PLAY RECAP from ansible output."""
-    recap = {}
-    in_recap = False
-    for line in output_lines:
-        if "PLAY RECAP" in line:
-            in_recap = True
-            continue
-        if in_recap and line.strip():
-            match = re.match(
-                r'(\S+)\s+:\s+ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)',
-                line.strip()
-            )
-            if match:
-                recap[match.group(1)] = {
-                    "ok": int(match.group(2)),
-                    "changed": int(match.group(3)),
-                    "unreachable": int(match.group(4)),
-                    "failed": int(match.group(5)),
-                }
-    return recap
-
-
-def generate_report(config, returncode, output_lines, elapsed, pre_check_results=None, repo_check_results=None):
-    """Generate a detailed setup report."""
-    print_step(11, "SETUP REPORT")
-
-    recap = parse_ansible_recap(output_lines)
-    nodes = config["nodes"]
-
-    now = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    overall_status = "SUCCESS" if returncode == 0 else "FAILED"
-
-    report_lines = []
-    report_lines.append("=" * 70)
-    report_lines.append("         MySQL InnoDB Cluster Setup Report")
-    report_lines.append("=" * 70)
-    report_lines.append("")
-    report_lines.append(f"  Report Date        : {now}")
-    report_lines.append(f"  Total Duration     : {format_duration(elapsed)}")
-    report_lines.append(f"  Overall Status     : {overall_status}")
-    report_lines.append(f"  Ansible Exit Code  : {returncode}")
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  RHEL REPOSITORY STATUS (Before Ansible)")
-    report_lines.append("-" * 70)
-
-    if repo_check_results:
-        for node in nodes:
-            ip = node["ip"]
-            label = f"{node['hostname']} ({ip})"
-            node_data = repo_check_results.get(ip, {})
-            os_id = node_data.get("os")
-            rhel_ver = node_data.get("rhel_version")
-            repos = node_data.get("repos", {})
-
-            if os_id is None:
-                report_lines.append(f"  {label}: check failed")
-            elif os_id != "rhel":
-                report_lines.append(f"  {label}: Not RHEL ({os_id}) — skipped")
-            else:
-                report_lines.append(f"  {label}: RHEL {rhel_ver}")
-                if repos:
-                    for repo, enabled in repos.items():
-                        status = "ENABLED " if enabled else "DISABLED"
-                        icon = "✓" if enabled else "✗"
-                        report_lines.append(f"    {icon} [{status}] {repo}")
-                else:
-                    report_lines.append(f"    No repo data (unsupported RHEL version or subscription-manager unavailable)")
-    else:
-        report_lines.append("  RHEL repository check was not performed.")
-
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  PRE-EXISTING MYSQL PACKAGES (Before Ansible)")
-    report_lines.append("-" * 70)
-
-    if pre_check_results:
-        report_lines.append(f"  {'Node':<35} {'mysql-server':<25} {'mysql-shell':<25}")
-        report_lines.append(f"  {'─' * 35} {'─' * 25} {'─' * 25}")
-        for node in nodes:
-            ip = node["ip"]
-            label = f"{node['hostname']} ({ip})"
-            pkgs = pre_check_results.get(ip, {})
-            server_ver = pkgs.get("mysql-server", "N/A")
-            shell_ver = pkgs.get("mysql-shell", "N/A")
-            report_lines.append(f"  {label:<35} {server_ver:<25} {shell_ver:<25}")
-    else:
-        report_lines.append("  Pre-existing package check was not performed.")
-
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  CLUSTER DETAILS")
-    report_lines.append("-" * 70)
-    report_lines.append(f"  Cluster Name       : {config['innodb_cluster_name']}")
-    report_lines.append(f"  Cluster Admin      : {config['innodb_admin_user']}")
-    report_lines.append(f"  Router User        : routeruser")
-    report_lines.append(f"  Master Node        : {nodes[0]['hostname']} ({nodes[0]['ip']})")
-    report_lines.append(f"  Slave Node 1       : {nodes[1]['hostname']} ({nodes[1]['ip']})")
-    report_lines.append(f"  Slave Node 2       : {nodes[2]['hostname']} ({nodes[2]['ip']})")
-    report_lines.append(f"  SSH User           : {config['ssh_user']}")
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  NODE STATUS (Ansible Recap)")
-    report_lines.append("-" * 70)
-
-    if recap:
-        report_lines.append(f"  {'Node':<35} {'OK':>5} {'Changed':>9} {'Unreachable':>13} {'Failed':>8}")
-        report_lines.append(f"  {'─' * 35} {'─' * 5} {'─' * 9} {'─' * 13} {'─' * 8}")
-        for node in nodes:
-            ip = node["ip"]
-            label = f"{node['hostname']} ({ip})"
-            if ip in recap:
-                r = recap[ip]
-                status_icon = "✓" if r["failed"] == 0 and r["unreachable"] == 0 else "✗"
-                report_lines.append(
-                    f"  {status_icon} {label:<33} {r['ok']:>5} {r['changed']:>9} "
-                    f"{r['unreachable']:>13} {r['failed']:>8}"
-                )
-            else:
-                report_lines.append(f"  ? {label:<33} {'N/A':>5} {'N/A':>9} {'N/A':>13} {'N/A':>8}")
-    else:
-        report_lines.append("  Ansible recap information not available.")
-
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  APPLIED ROLES")
-    report_lines.append("-" * 70)
-    report_lines.append("  1. pre_tasks                          /etc/hosts + hostname")
-    report_lines.append("  2. 01-os-preconfigure                 SSH banner + kernel parameters")
-    report_lines.append("  3. 02-mysql-install                   Firewall, Locale, NTP, MySQL install")
-    report_lines.append("  4. 03-mysql-innodb-cluster            InnoDB Cluster pre-configuration")
-    report_lines.append("  5. 04-mysql-create-innodb-cluster     Cluster creation + Router account")
-
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  NEXT STEPS")
-    report_lines.append("-" * 70)
-
-    if returncode == 0:
-        report_lines.append("  ✓ Cluster setup completed successfully!")
-        report_lines.append("")
-        report_lines.append("  Quick cluster status check:")
-        report_lines.append(f"    mysqlsh {config['innodb_admin_user']}@{nodes[0]['ip']} -- cluster status")
-        report_lines.append("")
-        report_lines.append("  Interactive cluster management:")
-        report_lines.append(f"    mysqlsh {config['innodb_admin_user']}@{nodes[0]['ip']}")
-        report_lines.append("    var cluster = dba.getCluster();")
-        report_lines.append("    cluster.status();")
-        report_lines.append("")
-        report_lines.append("  MySQL Router bootstrap:")
-        report_lines.append(f"    mysqlrouter --bootstrap routeruser@{nodes[0]['ip']}:3306 --user=mysqlrouter")
-    else:
-        report_lines.append("  ✗ Cluster setup encountered errors!")
-        report_lines.append(f"    Review the full log: {LOG_FILE}")
-        report_lines.append("")
-        report_lines.append("  Troubleshooting tips:")
-        report_lines.append("    - SSH error       : Verify SSH key/password and user permissions")
-        report_lines.append("    - DNS error       : Check /etc/hosts on all nodes")
-        report_lines.append("    - Install error   : Check internet connectivity and package sources")
-        report_lines.append("    - Firewall        : Ensure ports 3306, 33060, 33061 are open")
-        report_lines.append("    - Cluster error   : Check MySQL Shell output above for details")
-
-    report_lines.append("")
-    report_lines.append("-" * 70)
-    report_lines.append("  FILE LOCATIONS")
-    report_lines.append("-" * 70)
-    report_lines.append(f"  Configuration  : {CONFIG_FILE}")
-    report_lines.append(f"  Inventory      : {INVENTORY_FILE}")
-    report_lines.append(f"  Log File       : {LOG_FILE}")
-    report_lines.append(f"  This Report    : {REPORT_FILE}")
-
-    report_lines.append("")
-    report_lines.append("=" * 70)
-
-    report_content = "\n".join(report_lines)
-
-    # Save report to file
-    with open(REPORT_FILE, "w") as f:
-        f.write(report_content)
-
-    # Print report to screen
-    print(f"\n{Colors.CYAN}{report_content}{Colors.END}")
-
-    print_success(f"Report saved: {REPORT_FILE}")
-
-    return overall_status
-
-
-# ─── Main ─────────────────────────────────────────────────────────────────────
-
-def main():
-    # Suppress wall/broadcast messages (e.g. systemd-journald) by removing
-    # the group/other write bits from the controlling TTY directly.
-    # More reliable than `mesg n` when running as root via sudo.
-    try:
-        tty_path = os.ttyname(sys.stdin.fileno())
-        tty_stat = os.stat(tty_path)
-        os.chmod(tty_path, tty_stat.st_mode & ~(stat.S_IWGRP | stat.S_IWOTH))
-    except Exception:
-        pass
-
-    print_banner()
-
-    # Check root
-    check_root()
-
-    # Step 1: Setup environment
-    setup_environment()
-
-    # Step 2: Get configuration (load or collect)
-    config = get_configuration()
-
-    # Step 3: Generate inventory
-    generate_inventory(config)
-
-    # Step 4: Test connectivity
-    test_connectivity(config)
-
-    # Step 5: RHEL repository check
-    repo_check_results = check_rhel_repos_on_nodes(config)
-
-    # Step 6: Pre-existing MySQL package check
-    pre_check_results = check_mysql_packages_on_nodes(config)
-
-    # Step 7: Internet connectivity check (dev.mysql.com)
-    check_internet_connectivity(config)
-
-    # Step 8: MySQL version selection (OS-specific)
-    config = select_mysql_version_debian(config)
-    config = select_mysql_version_redhat(config)
-
-    # Step 9: Deployment confirmation
-    print_step(9, "DEPLOYMENT CONFIRMATION")
-
-    nodes = config["nodes"]
-    roles = ["Master", "Slave 1", "Slave 2"]
-
-    print_info("The following deployment will be executed:\n")
-    print(f"    {Colors.BOLD}Cluster :{Colors.END} {config['innodb_cluster_name']}")
-    print(f"    {Colors.BOLD}Admin   :{Colors.END} {config['innodb_admin_user']}")
-    print()
-    for i, node in enumerate(nodes):
-        icon = "★" if i == 0 else "●"
-        print(f"    {icon} {roles[i]:>8} : {node['hostname']} ({node['ip']})")
-    print()
-    print_hint("This will install MySQL, configure InnoDB Cluster,")
-    print_hint("create the router user, and verify cluster status.")
-    print()
-
-    if not prompt_yes_no("Proceed with deployment?", default_yes=True):
-        print_info("Deployment cancelled.")
+    step(5, "Deployment")
+    master = config["nodes"][0]
+    info(f"Cluster {config['innodb_cluster_name']}, master {master['hostname']} ({master['ip']}), "
+         f"MySQL {config['mysql_version_full']}")
+    if not ask_yes("Start the deployment?"):
         sys.exit(0)
 
-    # Step 10: Run playbook
-    returncode, output_lines, elapsed = run_playbook(config)
+    extra_vars = {key: config[key] for key in (
+        "mysql_root_password", "innodb_admin_user", "innodb_admin_password", "innodb_cluster_name",
+        "router_password", "ntp_primary", "ntp_fallback",
+        "mysql_version", "mysql_version_full", "mysql_shell_version")}
+    extra_vars["master_ip"] = master["ip"]
+    extra_vars["cluster_hosts"] = config["nodes"]
 
-    # Step 11: Generate report
-    status = generate_report(config, returncode, output_lines, elapsed, pre_check_results, repo_check_results)
+    vars_file = PLAYBOOK.parent / ".extra_vars.json"
+    vars_file.write_text(json.dumps(extra_vars))
+    os.chmod(vars_file, 0o600)
 
-    # Final message
-    print()
+    started = time.time()
+    output = []
+    try:
+        process = subprocess.Popen(
+            ["ansible-playbook", "-i", str(INVENTORY), str(PLAYBOOK), "--extra-vars", f"@{vars_file}"],
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, universal_newlines=True, bufsize=1)
+        with open(LOG_FILE, "w") as log:
+            for line in process.stdout:
+                sys.stdout.write(line)
+                log.write(line)
+                output.append(line.rstrip())
+        process.wait()
+    finally:
+        vars_file.unlink()
+    return process.returncode, output, time.time() - started
+
+
+def write_report(config, returncode, output, seconds):
+    step(6, "Report")
+    nodes = config["nodes"]
+    master = nodes[0]
+
+    recap = {}
+    for line in output:
+        match = re.match(r"(\S+)\s+:\s+ok=(\d+)\s+changed=(\d+)\s+unreachable=(\d+)\s+failed=(\d+)", line)
+        if match:
+            recap[match.group(1)] = match.groups()[1:]
+
+    lines = [
+        "MySQL InnoDB Cluster Setup Report",
+        "=" * 60,
+        f"Date            : {datetime.now():%Y-%m-%d %H:%M:%S}",
+        f"Result          : {'SUCCESS' if returncode == 0 else 'FAILED'} (ansible exit code {returncode})",
+        f"Duration        : {int(seconds // 60)} min {int(seconds % 60)} sec",
+        f"Cluster         : {config['innodb_cluster_name']}",
+        f"MySQL           : {config['mysql_version_full']}",
+        f"Cluster admin   : {config['innodb_admin_user']}",
+        "Router user     : routeruser",
+        "",
+        f"{'Node':<44} {'ok':>4} {'changed':>8} {'unreach':>8} {'failed':>7}",
+    ]
+    for role, node in zip(NODE_ROLES, nodes):
+        counts = recap.get(node["ip"], ("-",) * 4)
+        lines.append(f"{role + ': ' + node['hostname'] + ' (' + node['ip'] + ')':<44} "
+                     f"{counts[0]:>4} {counts[1]:>8} {counts[2]:>8} {counts[3]:>7}")
+    lines.append("")
     if returncode == 0:
-        print(f"  {Colors.GREEN}{Colors.BOLD}{'═' * 56}{Colors.END}")
-        print(f"  {Colors.GREEN}{Colors.BOLD}  MySQL InnoDB Cluster deployed successfully!{Colors.END}")
-        print(f"  {Colors.GREEN}{Colors.BOLD}{'═' * 56}{Colors.END}")
+        lines += [
+            "Next steps:",
+            f"  mysqlsh {config['innodb_admin_user']}@{master['ip']} -- cluster status",
+            f"  mysqlrouter --bootstrap routeruser@{master['ip']}:3306 --user=mysqlrouter",
+        ]
     else:
-        print(f"  {Colors.RED}{Colors.BOLD}{'═' * 56}{Colors.END}")
-        print(f"  {Colors.RED}{Colors.BOLD}  MySQL InnoDB Cluster deployment FAILED!{Colors.END}")
-        print(f"  {Colors.RED}{Colors.BOLD}{'═' * 56}{Colors.END}")
-        print_info(f"Review the log: {LOG_FILE}")
+        lines.append(f"Check the log: {LOG_FILE}")
 
-    print()
+    report = "\n".join(lines) + "\n"
+    REPORT_FILE.write_text(report)
+    print(report)
+    ok(f"Report saved: {REPORT_FILE}")
+
+
+def main():
+    print(f"\n{BOLD}MySQL InnoDB Cluster Setup v{VERSION}{END}")
+    try:
+        setup_environment()
+        config = get_config()
+        write_inventory_and_test(config)
+        select_mysql_version(config)
+        returncode, output, seconds = run_playbook(config)
+    except KeyboardInterrupt:
+        print(f"\n  {YELLOW}Cancelled.{END}")
+        sys.exit(130)
+    write_report(config, returncode, output, seconds)
     sys.exit(returncode)
 
 

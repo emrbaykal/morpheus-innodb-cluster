@@ -1,60 +1,15 @@
 ---
-
-- name: Create Cluster Admin user
-  community.mysql.mysql_query:
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-    login_unix_socket: "{{ mysql_socket_path }}"
-    query:
-      - "CREATE USER IF NOT EXISTS '{{ innodb_admin_user }}'@'%' IDENTIFIED WITH caching_sha2_password BY '{{ innodb_admin_password }}'"
-      - "GRANT ALL PRIVILEGES ON *.* TO '{{ innodb_admin_user }}'@'%' WITH GRANT OPTION"
-      - "FLUSH PRIVILEGES"
-  no_log: true
-
-- name: Delete blank users
-  community.mysql.mysql_query:
-    query: "DELETE FROM mysql.user WHERE User='';"
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-
-- name: Delete test database
-  community.mysql.mysql_db:
-    name: test
-    state: absent
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-
-- name: Delete references to test database
-  community.mysql.mysql_query:
-    query: "DELETE FROM mysql.db WHERE Db='test' OR Db='test\\_%';"
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-
-- name: Set invisible primary key
-  community.mysql.mysql_query:
-    query: "SET PERSIST sql_generate_invisible_primary_key=1;"
-    login_user: root
-    login_password: "{{ mysql_root_password }}"
-
-- name: Calculate innodb_buffer_pool_size (80% of total RAM)
-  set_fact:
-    innodb_buffer_pool_size_gb: "{{ ((ansible_memtotal_mb * 0.80) / 1024) | round(0, 'floor') | int }}"
-
-- name: Display calculated innodb_buffer_pool_size
-  debug:
-    msg: "Total RAM: {{ ansible_memtotal_mb }}MB -> innodb_buffer_pool_size: {{ innodb_buffer_pool_size_gb }}G (80%)"
-
-- name: Create MySQL InnoDB configuration file
+- name: Write the InnoDB Cluster settings
   copy:
-    dest: "{{ mysql_innodb_conf_dir }}/innodb-mysqld.cnf"
+    dest: "{{ mysql_conf_dir }}/innodb-mysqld.cnf"
     content: |
       [mysqld]
       bind-address = 0.0.0.0
       max_connections = 451
-      innodb_buffer_pool_size = {{ innodb_buffer_pool_size_gb }}G
+      innodb_buffer_pool_size = {{ (ansible_memtotal_mb * 0.8 / 1024) | int }}G
       innodb_use_fdatasync = ON
       innodb_numa_interleave = ON
-      sql_generate_invisible_primary_key = 1
+      sql_generate_invisible_primary_key = ON
       binlog_expire_logs_seconds = 604800
       binlog_expire_logs_auto_purge = ON
       gtid_mode = ON
@@ -63,31 +18,22 @@
 
       [mysqldump]
       set-gtid-purged = OFF
-    owner: root
-    group: root
-    mode: '0644'
-  notify:
-    - Restart mysql_db
+    mode: "0644"
+  notify: Restart mysql
 
-- name: Flush handlers
+- name: Restart MySQL with the new settings
   meta: flush_handlers
 
-- name: Verify applied MySQL parameters
+# Skipped when the user exists: secondaries are read-only once they joined the cluster.
+# sql_log_bin=0 keeps the account out of the GTID set, so no node has errant transactions.
+- name: Create the cluster admin user
   shell: >
-    mysql -u root -p'{{ mysql_root_password }}' -N -e
-    "SELECT CONCAT(
-      'innodb_buffer_pool_size=', CAST(@@innodb_buffer_pool_size / (1024*1024*1024) AS UNSIGNED), 'G',
-      ' | innodb_use_fdatasync=', @@innodb_use_fdatasync,
-      ' | sql_generate_invisible_primary_key=', @@sql_generate_invisible_primary_key,
-      ' | max_connections=', @@max_connections,
-      ' | binlog_expire_logs_seconds=', @@binlog_expire_logs_seconds,
-      ' | server_id=', @@server_id
-    );"
-  register: verify_params
-  changed_when: false
-  no_log: false
-
-- name: Display verified parameters
-  debug:
-    var: verify_params.stdout
-
+    mysql -u root -N -e "SELECT user FROM mysql.user WHERE user = '{{ innodb_admin_user }}' AND host = '%'" | grep -q . ||
+    { mysql -u root -e "SET SESSION sql_log_bin = 0;
+    CREATE USER '{{ innodb_admin_user }}'@'%' IDENTIFIED BY '{{ innodb_admin_password }}';
+    GRANT ALL PRIVILEGES ON *.* TO '{{ innodb_admin_user }}'@'%' WITH GRANT OPTION" && echo changed; }
+  environment:
+    MYSQL_PWD: "{{ mysql_root_password }}"
+  register: admin_user
+  changed_when: "'changed' in admin_user.stdout"
+  no_log: true
