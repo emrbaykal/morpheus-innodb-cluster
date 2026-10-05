@@ -34,11 +34,12 @@ for (var i = 0; i < nodes.length; i++) {
     }
 }
 
+var routerUser = {{ router_user | to_json }};
 var routerPassword = {{ router_password | to_json }};
 try {
-    cluster.setupRouterAccount("routeruser", {password: routerPassword});
+    cluster.setupRouterAccount(routerUser, {password: routerPassword});
 } catch (e) {
     if (String(e).indexOf("already exists") < 0) throw e;
-    cluster.setupRouterAccount("routeruser", {password: routerPassword, update: true});
+    cluster.setupRouterAccount(routerUser, {password: routerPassword, update: true});
 }
 print(JSON.stringify(cluster.status(), null, 2) + "\n");

@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.0.0"
+VERSION = "2.1.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 PLAYBOOK = BASE_DIR / "playbooks" / "mysql-innodb.yml"
@@ -49,6 +49,14 @@ for patch in $(seq 0 $last); do
 done
 wait
 """
+
+# repo.mysql.com is needed on every node; on RHEL the node must also reach its own
+# dnf repositories (CDN or Satellite) for AppStream.
+INTERNET_CHECK_CMD = (
+    "curl -fsS -o /dev/null --max-time 15 https://repo.mysql.com/ || echo MYSQL_REPO_UNREACHABLE; "
+    "if command -v dnf >/dev/null; then dnf -q makecache >/dev/null 2>&1 || echo DNF_REPOS_UNREACHABLE; fi; "
+    "echo DONE"
+)
 
 # RHEL: every mysql-server build in AppStream, modular streams included.
 RHEL_VERSIONS_CMD = "dnf -q repoquery --disable-modular-filtering --qf '%{version}' mysql-server"
@@ -193,6 +201,7 @@ def show_config(config):
         ("Privilege escalation", config["become_method"]),
         ("Cluster name", config["innodb_cluster_name"]),
         ("Cluster admin user", config["innodb_admin_user"]),
+        ("MySQL Router user", config.get("router_user", "routeruser")),
         ("NTP servers", f"{config['ntp_primary']}, {config['ntp_fallback']}"),
     ]
     if config.get("mysql_version_full"):
@@ -232,7 +241,8 @@ def collect_config(old):
     config["innodb_admin_user"] = ask("Cluster admin user", old.get("innodb_admin_user", "clusterAdmin"))
     config["innodb_admin_password"] = ask_password("Cluster admin password", old.get("innodb_admin_password", ""))
     config["innodb_cluster_name"] = ask("Cluster name", old.get("innodb_cluster_name", "mysql-cluster"))
-    config["router_password"] = ask_password("MySQL Router user (routeruser) password", old.get("router_password", ""))
+    config["router_user"] = ask("MySQL Router user", old.get("router_user", "routeruser"))
+    config["router_password"] = ask_password(f"{config['router_user']} password", old.get("router_password", ""))
 
     print(f"\n  {BOLD}NTP{END}")
     config["ntp_primary"] = ask("Primary NTP server", old.get("ntp_primary", "time.google.com"))
@@ -264,7 +274,7 @@ def get_config():
 
 
 def write_inventory_and_test(config):
-    step(3, "Inventory and SSH test")
+    step(3, "Inventory, SSH and internet access")
     lines = ["[mysql_nodes]"]
     lines += [f"{node['ip']} node_hostname={node['hostname']}" for node in config["nodes"]]
     lines += ["", "[mysql_nodes:vars]", f"ansible_user={config['ssh_user']}"]
@@ -289,6 +299,25 @@ def write_inventory_and_test(config):
             unreachable.append(node["ip"])
     if unreachable:
         fail("Fix SSH access to the nodes above and run the script again.")
+
+    info("Checking internet access from the nodes ...")
+    problems = []
+    for role, node in zip(NODE_ROLES, config["nodes"]):
+        output = run_on_node(node["ip"], INTERNET_CHECK_CMD) or []
+        errors = []
+        if "DONE" not in output:
+            errors.append("check failed")
+        if "MYSQL_REPO_UNREACHABLE" in output:
+            errors.append("repo.mysql.com unreachable")
+        if "DNF_REPOS_UNREACHABLE" in output:
+            errors.append("dnf repositories (AppStream) unreachable")
+        if errors:
+            print(f"  {RED}✗ {role:<12} {node['hostname']}: {', '.join(errors)}{END}")
+            problems.append(node["ip"])
+        else:
+            ok(f"{role:<12} {node['hostname']}: repositories reachable")
+    if problems:
+        fail("The nodes need HTTPS access to repo.mysql.com (and to the RHEL repositories). Fix it and run again.")
 
 
 def list_versions(master_ip, major):
@@ -343,6 +372,7 @@ def run_playbook(config):
         "mysql_root_password", "innodb_admin_user", "innodb_admin_password", "innodb_cluster_name",
         "router_password", "ntp_primary", "ntp_fallback",
         "mysql_version", "mysql_version_full", "mysql_shell_version")}
+    extra_vars["router_user"] = config.get("router_user", "routeruser")
     extra_vars["master_ip"] = master["ip"]
     extra_vars["cluster_hosts"] = config["nodes"]
 
@@ -387,7 +417,7 @@ def write_report(config, returncode, output, seconds):
         f"Cluster         : {config['innodb_cluster_name']}",
         f"MySQL           : {config['mysql_version_full']}",
         f"Cluster admin   : {config['innodb_admin_user']}",
-        "Router user     : routeruser",
+        f"Router user     : {config.get('router_user', 'routeruser')}",
         "",
         f"{'Node':<44} {'ok':>4} {'changed':>8} {'unreach':>8} {'failed':>7}",
     ]
@@ -400,7 +430,7 @@ def write_report(config, returncode, output, seconds):
         lines += [
             "Next steps:",
             f"  mysqlsh {config['innodb_admin_user']}@{master['ip']} -- cluster status",
-            f"  mysqlrouter --bootstrap routeruser@{master['ip']}:3306 --user=mysqlrouter",
+            f"  mysqlrouter --bootstrap {config.get('router_user', 'routeruser')}@{master['ip']}:3306 --user=mysqlrouter",
         ]
     else:
         lines.append(f"Check the log: {LOG_FILE}")

@@ -14,7 +14,7 @@
         dest: /root/create_cluster.js
         mode: "0600"
 
-    - name: Configure the instances, create the cluster, add the secondaries, set up routeruser
+    - name: Configure the instances, create the cluster, add the secondaries, set up the router user
       command: mysqlsh --no-wizard --js --file=/root/create_cluster.js
       register: mysqlsh
       changed_when: "'created' in mysqlsh.stdout or 'added' in mysqlsh.stdout"

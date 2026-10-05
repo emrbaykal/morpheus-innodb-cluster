@@ -10,15 +10,6 @@
     dest: /etc/ssh/sshd_config.d/99-banner.conf
     content: "Banner /etc/issue.net\n"
     mode: "0644"
-  when: not (ansible_os_family == 'RedHat' and ansible_distribution_major_version == '8')
-  notify: Restart sshd
-
-- name: Enable the SSH banner (RHEL 8 has no sshd_config.d)
-  lineinfile:
-    path: /etc/ssh/sshd_config
-    regexp: '^#?Banner'
-    line: Banner /etc/issue.net
-  when: ansible_os_family == 'RedHat' and ansible_distribution_major_version == '8'
   notify: Restart sshd
 
 # ── Security services ──
