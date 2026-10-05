@@ -67,7 +67,7 @@ The recommended 3-Node HA deployment looks like this: three Morpheus application
 
 The [HPE 3-Node HA Install documentation](https://support.hpe.com/hpesc/public/docDisplay?docId=sd00007510en_us&page=GUID-2D8A0A86-2231-4239-AB44-5475B4AE0827.html) specifies the following MySQL requirements:
 
-- **MySQL version v8.0.x** (minimum of v8.0.72)
+- **MySQL version v8.0.x** (minimum of v8.0.32); the Morpheus documentation lists **MySQL 8.4 LTS** as supported for external clusters from Morpheus 9.1.0
 - **MySQL cluster with at least 3 nodes** for redundancy
 - **Morpheus application nodes must have connectivity** to the MySQL cluster
 
@@ -112,7 +112,7 @@ Every single node in the cluster needs identical preparation: OS tuning, kernel 
 
 ### 2. MySQL Installation Complexity
 
-Installing MySQL involves adding the correct repository for your OS version, selecting the right MySQL stream and version, managing package locks to prevent accidental upgrades, and configuring the service with appropriate systemd overrides. On RHEL systems, you also have to deal with AppStream module conflicts and subscription-manager repositories. Remember — Morpheus requires MySQL v8.0.x minimum v8.0.72, so version selection matters.
+Installing MySQL involves adding the correct repository for your OS version, selecting the right MySQL stream and version, managing package locks to prevent accidental upgrades, and configuring the service with appropriate systemd overrides. On RHEL systems, you also have to deal with AppStream module conflicts and subscription-manager repositories. The MySQL version also has to match what your Morpheus release supports.
 
 ### 3. InnoDB-Specific Tuning
 
@@ -138,29 +138,36 @@ To put this in perspective, look at how much manual work the HPE documentation a
 
 ## Introducing morpheus-innodb-cluster
 
-The **morpheus-innodb-cluster** project eliminates all of this manual toil. It is a single Python script (`innodb_cluster_setup.py`) that orchestrates the entire deployment through an interactive 11-step wizard, backed by four modular Ansible roles that handle the actual configuration work.
+The **morpheus-innodb-cluster** project takes this manual work off your hands. It is a single Python script (`innodb_cluster_setup.py`) that walks you through a six-step wizard and then hands the actual configuration to four Ansible roles.
 
 ### Architecture at a Glance
 
 ```
 You (on master node)
   └── innodb_cluster_setup.py  (Python orchestrator)
-        ├── Step 1-9:  Interactive wizard (collect & validate)
-        └── Step 10:   Ansible playbook execution
-              ├── Role 01: OS Pre-configuration
-              ├── Role 02: MySQL Installation
-              ├── Role 03: InnoDB Cluster Pre-configuration
-              └── Role 04: Cluster Creation (master only)
-        └── Step 11:   Setup Report
+        ├── Steps 1-4:  environment, configuration, SSH + internet check, MySQL version
+        ├── Step 5:     Ansible playbook
+        │     ├── Role 01: OS pre-configuration
+        │     ├── Role 02: MySQL installation
+        │     ├── Role 03: InnoDB Cluster pre-configuration
+        │     └── Role 04: Cluster creation (master only)
+        └── Step 6:     Setup report
 ```
 
-The script is designed to run **from the master node** of the cluster. It installs its own dependencies (Ansible, sshpass, community.mysql collection), connects to all three nodes via SSH, and executes the Ansible playbook that does the heavy lifting. You don't need to pre-install anything other than Python 3.6+ and sudo access.
+The script runs on the node that will become the cluster primary. It installs Ansible and `sshpass` if they are missing, connects to the three nodes over SSH and runs the playbook. Apart from Python 3 and sudo you do not need to prepare anything on that node, and no Ansible Galaxy collections are used.
+
+| OS | MySQL Server comes from | MySQL Shell comes from |
+|----|-------------------------|------------------------|
+| RHEL 9 / 10 | Red Hat AppStream | repo.mysql.com tools repository |
+| Ubuntu 24.04 / 26.04 | repo.mysql.com | repo.mysql.com |
+
+On RHEL the server packages are Red Hat's own build, so a database problem can be raised with Red Hat support. MySQL Shell is not part of AppStream, which is why it comes from Oracle's tools repository.
 
 ---
 
 ## Step-by-Step Walkthrough
 
-Let's walk through the entire deployment process, using screenshots from a real deployment on RHEL 9 nodes.
+The screenshots below come from a deployment on three RHEL 9 nodes.
 
 ### Getting Started
 
@@ -172,135 +179,95 @@ cd morpheus-innodb-cluster
 sudo python3 innodb_cluster_setup.py
 ```
 
-### Step 1/11 — Environment Setup
+### Step 1/6 — Environment
 
-The script begins by detecting your operating system family and automatically installing all required prerequisites. On RHEL systems, it checks for the Ansible Automation Platform repository in subscription-manager; if it's not enabled, the script gracefully falls back to installing Ansible via pip3.
+The script detects the local OS and installs what is missing: `ansible-core` and `sshpass` on RHEL, `ansible` and `sshpass` on Ubuntu.
 
-![Step 1 - Environment Setup](screenshots-blog/screen-1.png)
+![Step 1 - Environment](screenshots-blog/screen-1.png)
 
-In the screenshot above, you can see the tool detecting RHEL 9, installing `sshpass` and `python3-pip` via the OS package manager, falling back to pip for Ansible (since the AAP repository wasn't enabled in subscription-manager), and installing the `community.mysql` Ansible collection. The entire environment is ready in seconds.
+### Step 2/6 — Cluster Configuration
 
-### Step 2/11 — Cluster Configuration
+The wizard asks for the three nodes (hostname and IP; the first one is the master), the SSH user with a key or a password, the privilege escalation method (`sudo` or `dzdo`), the MySQL root password, the cluster admin user, the cluster name, the MySQL Router account (default name `routeruser`) and the NTP servers.
 
-This is the heart of the wizard. It collects all the information needed in five organized sections:
+![Step 2 - Cluster Nodes and SSH](screenshots-blog/screen-2.png)
 
-**Section 1/5 — Cluster Nodes:** You provide the hostname and IP address for each of the three cluster nodes. The first node is automatically designated as the master (primary), and the other two become secondaries. Each entry is validated for connectivity immediately.
+![Step 2 - MySQL, Router and NTP](screenshots-blog/screen-3.png)
 
-**Section 2/5 — SSH Connection:** The script asks for the SSH user, key file (or password), privilege escalation method (sudo or dzdo), and sudo password. This is how Ansible will connect to all three nodes.
-
-![Step 2 - Cluster Configuration](screenshots-blog/screen-2.png)
-
-**Section 3/5 — MySQL Credentials:** You set the MySQL root password and the InnoDB Cluster admin credentials. The cluster admin user (default: `clusterAdmin`) is the account that will manage the InnoDB Cluster.
-
-**Section 4/5 — Cluster Settings:** You name your cluster (in our case, `morpheus-cluster`) and set a password for the MySQL Router user account (`routeruser`) that will be created for application connectivity.
-
-**Section 5/5 — System Settings:** NTP server configuration for time synchronization across all nodes — critical for Group Replication to function correctly.
-
-![Step 2 - MySQL Credentials and Cluster Settings](screenshots-blog/screen-3.png)
-
-### Configuration Summary
-
-Before anything is written to disk or executed, the script presents a complete summary table of everything you've entered — cluster nodes with IPs, SSH connection details, MySQL configuration, and system settings. You review and confirm with `y` before proceeding.
+The last question is whether the passwords may be stored in `cluster_config.json`. If you answer no, the file keeps everything else, the script asks for the passwords on the next run, and the generated inventory is deleted when the run ends. Before anything is saved you get a summary to confirm.
 
 ![Configuration Summary](screenshots-blog/screen-4.png)
 
-This is a safety net. All passwords are masked, and the configuration is saved to `cluster_config.json` with mode `0600` so it can be reused on subsequent runs without re-entering everything.
+On a later run the saved answers are shown again. If you want to change something, every question comes back with the old value as its default, so you only retype what changed.
 
-### Steps 3–4 — Inventory Generation & SSH Connectivity Test
+### Step 3/6 — Inventory, SSH and Internet Access
 
-The script generates an Ansible inventory file from your inputs and then tests SSH connectivity to every node. This catches authentication problems, firewall issues, or unreachable hosts **before** the deployment begins.
+The script writes the Ansible inventory, pings every node over SSH and then checks that each node can reach `repo.mysql.com` over HTTPS. On RHEL it also refreshes the dnf metadata, which proves the node can reach its own repositories whether they come from the Red Hat CDN or a Satellite server. If a node fails either check the script stops here, because the version list and the installation in the next steps depend on it. The dnf refresh can take a minute on a freshly installed RHEL node.
 
-![Inventory Generation and SSH Test](screenshots-blog/screen-5.png)
+![Step 3 - Inventory, SSH and Internet Access](screenshots-blog/screen-5.png)
 
-In our deployment, all three nodes — `innodb-rhel-1` (192.168.42.100), `innodb-rhel-2` (192.168.42.102), and `innodb-rhel-3` (192.168.42.101) — came back as reachable. The inventory uses IP addresses throughout, making the deployment DNS-independent. Note the `ansible_ssh_common_args='-o StrictHostKeyChecking=no'` setting, which prevents SSH from blocking first-time connections.
+### Step 4/6 — MySQL Version
 
-### Steps 5–8 — Pre-Flight Checks & MySQL Version Selection
+You choose the series first and then the exact version. Pick the series your Morpheus release supports: according to the Morpheus documentation, the 3-node HA database requirement is MySQL 8.0.x with a minimum of 8.0.32, and MySQL 8.4 LTS is supported for external clusters from Morpheus 9.1.0.
 
-The script performs three validation checks before deployment:
+The version list is read live from the repository the node will install from. On RHEL it shows every `mysql-server` build AppStream carries for that series. On Ubuntu, Oracle's APT index only lists the newest build, so the script takes the newest version from the index and checks the repository pool for every older patch release that is still downloadable.
 
-**Step 5 — RHEL Repository Check:** Verifies that `rhel-9-for-x86_64-baseos-rpms` and `rhel-9-for-x86_64-appstream-rpms` are enabled on all nodes. These repositories are required for MySQL dependencies.
+![Step 4 - MySQL Version Selection](screenshots-blog/screen-7.png)
 
-**Step 6 — Pre-Flight MySQL Package Check:** Scans all nodes for pre-existing `mysql-server` and `mysql-shell` installations that could cause conflicts. A clean slate ensures a predictable deployment.
+The newest version is the default. Whatever you pick is installed exactly, and all MySQL packages are then locked (`dnf versionlock` on RHEL, `apt-mark hold` on Ubuntu) so a routine OS update does not move the database. MySQL Shell is installed as the newest build of the same series; Oracle's Shell releases do not follow every AppStream build, and a newer Shell manages older servers of its series without issue.
 
-**Step 7 — Internet Connectivity Check:** Tests that all nodes can reach `dev.mysql.com` to download MySQL packages.
+### Step 5/6 — Deployment
 
-![Pre-Flight Checks - Repository, MySQL Package, and Internet Connectivity](screenshots-blog/screen-6.png)
-
-**Step 8 — MySQL Version Selection:** On RHEL systems, the script presents the available MySQL AppStream streams (8.0 and 8.4) and then lists the specific versions within your chosen stream. In our deployment, we selected **MySQL 8.4.7** from the 8.4 LTS stream — well above the HPE minimum requirement of v8.0.72.
-
-![MySQL Version Selection](screenshots-blog/screen-7.png)
-
-### Step 9/11 — Deployment Confirmation
-
-A final confirmation screen shows exactly what will be deployed: the cluster name (`morpheus-cluster`), admin user (`clusterAdmin`), and all three nodes with their roles. The master node is marked with a star.
+After a final confirmation the playbook runs and its output streams to the terminal and to `cluster_setup.log`.
 
 ![Deployment Confirmation](screenshots-blog/screen-8.png)
 
-### Step 10/11 — Ansible Playbook Execution
+The playbook does the following, in this order:
 
-Once you confirm, the Ansible playbook executes with real-time streaming output. You can watch every task as it runs across all three nodes. The playbook applies five roles in sequence:
-
-1. **pre_tasks** — Populates `/etc/hosts` with cluster node entries and sets hostnames on all nodes
-2. **01-os-preconfigure** — Deploys SSH banners, disables SELinux/AppArmor, configures firewall rules (ports 3306, 33060, 33061), sets locale, installs and configures NTP (chrony/systemd-timesyncd), tunes kernel parameters for database workloads, disables Transparent Huge Pages, and sets MySQL-specific system limits
-3. **02-mysql-install** — Adds the MySQL repository, selects the AppStream stream/version, installs MySQL Server and MySQL Shell, configures systemd overrides with NUMA interleaving, and sets the root password
-4. **03-mysql-innodb-cluster** — Creates the cluster admin user, removes anonymous users, drops the test database, writes InnoDB-optimized `my.cnf` configuration (with buffer pool auto-sized to 80% of RAM), enables GTID mode, and restarts MySQL
-5. **04-mysql-create-innodb-cluster** — Runs on the master node only: configures instances via `dba.configureInstance()` in MySQL Shell, creates the cluster with `dba.createCluster()`, adds secondary nodes with clone-based recovery, verifies cluster status, and creates the `routeruser` account
+1. Pre-tasks remove the node's own name from `127.x` lines in `/etc/hosts` (many cloud images map the hostname to loopback, and InnoDB Cluster refuses that), add the three nodes to `/etc/hosts` and set the hostname.
+2. Role 01 applies the SSH banner, sets SELinux to permissive or stops AppArmor, stops the host firewall, sets the locale and NTP, raises the limits for the `mysql` user, writes the kernel parameters and disables Transparent Huge Pages.
+3. Role 02 installs the selected MySQL version and MySQL Shell, adds a systemd drop-in that starts `mysqld` under `numactl --interleave=all`, and sets the root password.
+4. Role 03 writes `innodb-mysqld.cnf` with GTID enabled, invisible primary keys on, the buffer pool at 80% of RAM and a `server_id` derived from the node's full IP address, so it stays unique when a second site in another subnet joins a ClusterSet later. It then creates the cluster admin user without writing it to the binary log, which keeps the nodes free of errant GTIDs.
+5. Role 04 runs on the master only. A single MySQL Shell script configures the three instances, creates the cluster (or reuses an existing one), adds the two secondaries with clone recovery, creates or updates the MySQL Router account and prints `cluster.status()`.
 
 ![Ansible Playbook Execution](screenshots-blog/screen-9.png)
 
-In our deployment, the entire Ansible playbook completed in **4 minutes and 31 seconds** with zero failures across all three nodes.
+On our three-node lab the whole playbook takes about five minutes.
 
-### Step 11/11 — Setup Report
+### Step 6/6 — Setup Report
 
-After completion, the script generates a comprehensive setup report that includes everything you need to verify and manage your new cluster.
+At the end the script writes `cluster_setup_report.txt` with the result, the duration, the play recap per node and the commands you need next.
 
-![Setup Report - Header and Status](screenshots-blog/screen-10.png)
+![Setup Report](screenshots-blog/screen-10.png)
 
-The **NODE STATUS** section shows the Ansible PLAY RECAP for each node — in our deployment, the master node had 70 OK / 32 Changed tasks, while each secondary had 61 OK / 26 Changed, with zero unreachable or failed across the board.
-
-The **APPLIED ROLES** section shows what each role did, and the **NEXT STEPS** section provides ready-to-use commands:
-
-![Applied Roles, Next Steps, and File Locations](screenshots-blog/screen-11.png)
+![Next Steps](screenshots-blog/screen-11.png)
 
 ```bash
 # Quick cluster status check
-mysqlsh clusterAdmin@192.168.42.100 -- cluster status
-
-# Interactive cluster management
-mysqlsh clusterAdmin@192.168.42.100
-var cluster = dba.getCluster();
-cluster.status();
+mysqlsh clusterAdmin@<master-ip> -- cluster status
 
 # Bootstrap MySQL Router (run on each Morpheus app node)
-mysqlrouter --bootstrap routeruser@192.168.42.100:3306 --user=mysqlrouter
+mysqlrouter --bootstrap routeruser@<master-ip>:3306 --user=mysqlrouter
 ```
 
 ---
 
 ## What Makes This Project Different
 
-### Truly Idempotent
+### Safe to Re-run
 
-The entire workflow is safe to re-run. The script saves your configuration to `cluster_config.json` and offers to reuse it on subsequent runs. Ansible tasks check the current state before making changes. MySQL root password handling tries socket authentication first, then falls back to the existing password.
+You can run the script again on an existing cluster. It detects the cluster and its members and leaves them alone, the root password and cluster admin user are only created when they are missing, and a node that already has a `server_id` keeps it, since changing it on a running member breaks recovery. If something fails halfway, fix the cause and run the script again.
 
-### OS-Aware Automation
+### One Script, Two OS Families
 
-The Ansible roles automatically detect `ansible_os_family` and execute the appropriate tasks for each distribution. Whether you're running Ubuntu 22.04, Ubuntu 24.04, RHEL 8, or RHEL 9, the same script handles everything — from repository management and package names to configuration file paths and service names.
+The same playbook covers RHEL 9/10 and Ubuntu 24.04/26.04. The differences in package sources, service names, configuration paths and security frameworks are handled inside the roles, so you do not maintain two runbooks.
 
-### Production-Grade Tuning
+### Tuned for a Database Workload
 
-This isn't just a "get MySQL running" script. It applies production-grade OS and database tuning:
+Beyond getting MySQL running, the roles apply the OS and database settings we use in production: larger TCP backlogs and connection queues, low swappiness, raised file and process limits for the `mysql` user, NUMA interleaving, Transparent Huge Pages off, the buffer pool sized to 80% of RAM, GTID-based replication and seven days of binary logs.
 
-- **Kernel parameters:** TCP backlog, connection queue, TIME_WAIT reuse, swap minimization, dirty page ratios, file descriptor limits, and async I/O limits
-- **MySQL limits:** 65,535 open files, 65,535 processes, unlimited memory lock
-- **NUMA interleaving:** MySQL runs with `numactl --interleave=all` for optimal memory access on multi-socket servers
-- **InnoDB buffer pool:** Automatically sized to 80% of total RAM
-- **GTID-based replication:** Required for InnoDB Cluster and enabled automatically
-- **Binary log management:** Automatic purge after 7 days
+### Careful with Credentials
 
-### Security by Default
-
-All generated configuration files are created with mode `0600`. Passwords are never logged (Ansible `no_log: true`). Terminal input is masked for all password prompts. Temporary credential files in `/tmp/` are cleaned up after cluster creation.
+The configuration file and the inventory are created with mode `0600`, Ansible tasks that handle passwords run with `no_log`, password prompts are not echoed, and the temporary MySQL Shell script is removed after the cluster is built. You can also choose not to store the passwords at all.
 
 ---
 

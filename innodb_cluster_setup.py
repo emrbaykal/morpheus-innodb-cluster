@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.1.0"
+VERSION = "2.2.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 PLAYBOOK = BASE_DIR / "playbooks" / "mysql-innodb.yml"
@@ -30,6 +30,9 @@ LOG_FILE = BASE_DIR / "cluster_setup.log"
 REPORT_FILE = BASE_DIR / "cluster_setup_report.txt"
 
 MAJOR_VERSIONS = ["8.0", "8.4"]
+DEFAULT_MAJOR = "8.4"  # 8.0 reached end of life in April 2026
+PASSWORD_KEYS = ["ssh_password", "become_password", "mysql_root_password",
+                 "innodb_admin_password", "router_password"]
 NODE_ROLES = ["Master", "Secondary 1", "Secondary 2"]
 TOTAL_STEPS = 6
 
@@ -188,8 +191,27 @@ def load_config():
 
 
 def save_config(config):
-    CONFIG_FILE.write_text(json.dumps(config, indent=4))
+    """Write the answers to disk; passwords only when the user chose to keep them."""
+    data = dict(config)
+    if not config.get("save_passwords", True):
+        for key in PASSWORD_KEYS:
+            data.pop(key, None)
+    CONFIG_FILE.write_text(json.dumps(data, indent=4))
     os.chmod(CONFIG_FILE, 0o600)
+
+
+def ask_missing_passwords(config):
+    """Ask for the passwords a saved configuration does not contain."""
+    needed = [("mysql_root_password", "MySQL root password"),
+              ("innodb_admin_password", "Cluster admin password"),
+              ("router_password", f"{config.get('router_user', 'routeruser')} password")]
+    if not config.get("ssh_key_file"):
+        needed.insert(0, ("ssh_password", "SSH password"))
+    if config.get("become_needs_password", bool(config.get("become_password"))):
+        needed.insert(1, ("become_password", f"{config['become_method']} password"))
+    for key, label in needed:
+        if not config.get(key):
+            config[key] = ask_password(label)
 
 
 def show_config(config):
@@ -203,6 +225,7 @@ def show_config(config):
         ("Cluster admin user", config["innodb_admin_user"]),
         ("MySQL Router user", config.get("router_user", "routeruser")),
         ("NTP servers", f"{config['ntp_primary']}, {config['ntp_fallback']}"),
+        ("Passwords saved", "yes" if config.get("save_passwords", True) else "no"),
     ]
     if config.get("mysql_version_full"):
         rows.append(("MySQL version", config["mysql_version_full"]))
@@ -233,7 +256,9 @@ def collect_config(old):
     config["ssh_password"] = "" if key else ask_password("SSH password", old.get("ssh_password", ""))
     config["become_method"] = choose("Privilege escalation", ["sudo", "dzdo"], old.get("become_method", "sudo"))
     config["become_password"] = ""
-    if ask_yes(f"Does {config['become_method']} need a password?", bool(old.get("become_password"))):
+    config["become_needs_password"] = ask_yes(f"Does {config['become_method']} need a password?",
+                                              old.get("become_needs_password", bool(old.get("become_password"))))
+    if config["become_needs_password"]:
         config["become_password"] = ask_password(f"{config['become_method']} password", old.get("become_password", ""))
 
     print(f"\n  {BOLD}MySQL{END}")
@@ -248,6 +273,9 @@ def collect_config(old):
     config["ntp_primary"] = ask("Primary NTP server", old.get("ntp_primary", "time.google.com"))
     config["ntp_fallback"] = ask("Fallback NTP server", old.get("ntp_fallback", "pool.ntp.org"))
 
+    print()
+    config["save_passwords"] = ask_yes("Save the passwords in cluster_config.json?", old.get("save_passwords", True))
+
     for key in ("mysql_version", "mysql_version_full", "mysql_shell_version"):
         if old.get(key):
             config[key] = old[key]
@@ -261,6 +289,7 @@ def get_config():
         info("Saved configuration found:")
         show_config(config)
         if ask_yes("Use it?"):
+            ask_missing_passwords(config)
             return config
 
     while True:
@@ -300,7 +329,7 @@ def write_inventory_and_test(config):
     if unreachable:
         fail("Fix SSH access to the nodes above and run the script again.")
 
-    info("Checking internet access from the nodes ...")
+    info("Checking internet access from the nodes (dnf metadata refresh can take a minute on RHEL) ...")
     problems = []
     for role, node in zip(NODE_ROLES, config["nodes"]):
         output = run_on_node(node["ip"], INTERNET_CHECK_CMD) or []
@@ -345,7 +374,7 @@ def select_mysql_version(config):
         if ask_yes("Keep it?"):
             return
 
-    major = choose("MySQL series", MAJOR_VERSIONS, config.get("mysql_version", "8.0"))
+    major = choose("MySQL series", MAJOR_VERSIONS, config.get("mysql_version", DEFAULT_MAJOR))
     info(f"Reading the MySQL {major} versions available to {config['nodes'][0]['ip']} ...")
     versions, shell = list_versions(config["nodes"][0]["ip"], major)
     if not versions:
@@ -453,6 +482,8 @@ def main():
         print(f"\n  {YELLOW}Cancelled.{END}")
         sys.exit(130)
     write_report(config, returncode, output, seconds)
+    if not config.get("save_passwords", True):
+        INVENTORY.unlink(missing_ok=True)  # it holds the SSH/sudo passwords
     sys.exit(returncode)
 
 

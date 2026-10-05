@@ -1,4 +1,18 @@
 ---
+# server_id is the node's cluster IP as a 32-bit number, so it is unique across subnets and
+# sites (ClusterSet). A node that already has one keeps it: changing it on a member breaks recovery.
+- name: Read the current server_id
+  shell: awk -F '= *' '/^server_id/ {print $2}' {{ mysql_conf_dir }}/innodb-mysqld.cnf
+  register: current_server_id
+  changed_when: false
+  failed_when: false
+
+- name: Set server_id
+  vars:
+    octets: "{{ inventory_hostname.split('.') | map('int') | list }}"
+  set_fact:
+    mysql_server_id: "{{ current_server_id.stdout or octets[0] * 16777216 + octets[1] * 65536 + octets[2] * 256 + octets[3] }}"
+
 - name: Write the InnoDB Cluster settings
   copy:
     dest: "{{ mysql_conf_dir }}/innodb-mysqld.cnf"
@@ -14,7 +28,7 @@
       binlog_expire_logs_auto_purge = ON
       gtid_mode = ON
       enforce_gtid_consistency = ON
-      server_id = {{ ansible_default_ipv4.address.split('.')[-1] }}
+      server_id = {{ mysql_server_id }}
 
       [mysqldump]
       set-gtid-purged = OFF

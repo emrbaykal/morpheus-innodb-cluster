@@ -34,11 +34,13 @@ sudo python3 innodb_cluster_setup.py
 | 1. Environment | Installs Ansible and sshpass when missing |
 | 2. Cluster configuration | Asks for nodes, SSH, MySQL passwords, cluster name, MySQL Router user and NTP; saves `cluster_config.json` |
 | 3. Inventory, SSH and internet access | Writes `playbooks/inventory.ini`, pings every node, then checks that every node reaches `repo.mysql.com` over HTTPS and, on RHEL, its dnf repositories |
-| 4. MySQL version | Pick 8.0 or 8.4, then pick the exact version from the list the repository offers today |
+| 4. MySQL version | Pick 8.0 or 8.4 (default 8.4; 8.0 is end of life), then pick the exact version from the list the repository offers today |
 | 5. Deployment | Runs `playbooks/mysql-innodb.yml` and logs to `cluster_setup.log` |
 | 6. Report | Writes `cluster_setup_report.txt` |
 
 On a re-run the saved answers are offered again. Choosing "n" walks through the questions with the old values as defaults; Enter keeps a value, and a password prompt left empty keeps the saved password.
+
+Step 2 also asks whether the passwords may be saved in `cluster_config.json`. If not, the file keeps everything except the passwords, the script asks for them on every run, and `playbooks/inventory.ini` is deleted at the end of the run.
 
 ## How the version list is built
 
@@ -76,7 +78,7 @@ binlog_expire_logs_seconds = 604800
 binlog_expire_logs_auto_purge = ON
 gtid_mode = ON
 enforce_gtid_consistency = ON
-server_id = <last octet of the node IP>
+server_id = <node IP as a 32-bit number, e.g. 192.168.42.117 -> 3232246389>
 
 [mysqldump]
 set-gtid-purged = OFF
@@ -110,15 +112,15 @@ ansible-playbook -i inventory.ini mysql-innodb.yml --tags cluster --extra-vars @
 
 | File | Purpose |
 |------|---------|
-| `cluster_config.json` (0600) | Saved answers, including passwords |
+| `cluster_config.json` (0600) | Saved answers; passwords only if you chose to save them |
 | `playbooks/inventory.ini` (0600) | Ansible inventory, may contain the SSH/sudo password |
 | `cluster_setup.log` | Full Ansible output |
 | `cluster_setup_report.txt` | Summary |
 
 ## Notes
 
-- `server_id` is the last octet of the node IP. Nodes in different subnets (for example a second data center in a ClusterSet) can end up with the same value; set it by hand in that case.
-- The cluster admin user has full privileges from any host (`'%'`). Restrict it if your network requires it.
+- `server_id` is derived from the full node IP, so it stays unique across subnets and ClusterSet sites. A node that already has a `server_id` in `innodb-mysqld.cnf` keeps it on a re-run, because changing it on a cluster member breaks recovery.
+- The cluster admin user has full privileges from any host (`'%'`). This is deliberate: MySQL Shell must reach the nodes from the other ClusterSet site, which sits in a different subnet.
 
 ## License
 
