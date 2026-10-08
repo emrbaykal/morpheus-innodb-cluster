@@ -20,6 +20,10 @@
       [mysqld]
       bind-address = 0.0.0.0
       max_connections = 451
+      max_allowed_packet = 256M
+      character-set-server = utf8mb4
+      collation-server = utf8mb4_general_ci
+      default-time-zone = '+00:00'
       innodb_buffer_pool_size = {{ (ansible_memtotal_mb * 0.8 / 1024) | int }}G
       innodb_use_fdatasync = ON
       innodb_numa_interleave = ON

@@ -70,6 +70,10 @@ All MySQL packages are then held (`dnf versionlock` / `apt-mark hold`), so an OS
 [mysqld]
 bind-address = 0.0.0.0
 max_connections = 451
+max_allowed_packet = 256M
+character-set-server = utf8mb4
+collation-server = utf8mb4_general_ci
+default-time-zone = '+00:00'
 innodb_buffer_pool_size = <80% of RAM>G
 innodb_use_fdatasync = ON
 innodb_numa_interleave = ON
@@ -90,14 +94,29 @@ It then restarts MySQL and creates the cluster admin user (`ALL PRIVILEGES ... W
 
 ## After the deployment
 
+Check the cluster:
+
 ```bash
 mysqlsh clusterAdmin@<master-ip> -- cluster status
+```
+
+Create the Morpheus database with the character set and collation Morpheus requires:
+
+```sql
+CREATE DATABASE morpheus CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;
+```
+
+In a distributed (HA) Morpheus installation, install MySQL Router on **every Morpheus application node** and bootstrap it there, then point each node's `morpheus.rb` at the local Router (`mysql['host'] = {'127.0.0.1' => 6446}`):
+
+```bash
 mysqlrouter --bootstrap <router-user>@<master-ip>:3306 --user=mysqlrouter
 ```
 
 Ports between the nodes: 3306 (classic), 33060 (X protocol), 33061 (Group Replication).
 
 ## Re-running parts of the playbook
+
+A change to `innodb-mysqld.cnf` restarts MySQL on all three nodes at the same time. On a running cluster, apply such changes one node at a time.
 
 Each role has a tag: `os`, `install`, `configure`, `cluster`.
 

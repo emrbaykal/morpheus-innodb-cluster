@@ -20,7 +20,7 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-VERSION = "2.2.0"
+VERSION = "2.3.0"
 
 BASE_DIR = Path(__file__).resolve().parent
 PLAYBOOK = BASE_DIR / "playbooks" / "mysql-innodb.yml"
@@ -459,7 +459,14 @@ def write_report(config, returncode, output, seconds):
         lines += [
             "Next steps:",
             f"  mysqlsh {config['innodb_admin_user']}@{master['ip']} -- cluster status",
+            "",
+            "Create the Morpheus database:",
+            "  CREATE DATABASE morpheus CHARACTER SET utf8mb4 COLLATE utf8mb4_general_ci;",
+            "",
+            "On EVERY Morpheus application node (HA / distributed install):",
+            "  install MySQL Router, then bootstrap it against the cluster:",
             f"  mysqlrouter --bootstrap {config.get('router_user', 'routeruser')}@{master['ip']}:3306 --user=mysqlrouter",
+            "  and set mysql['host'] = {'127.0.0.1' => 6446} in /etc/morpheus/morpheus.rb",
         ]
     else:
         lines.append(f"Check the log: {LOG_FILE}")
